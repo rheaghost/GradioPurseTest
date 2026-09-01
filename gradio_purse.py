@@ -1,0 +1,3426 @@
+# 
+# ok pdf output xlsx input chart all work
+# 2608111845
+# now lets implement manual entry and sqlite
+# pdf sqlite now work 2608112236
+# pwd entry function ok 2608122030
+# budget & edgar advanced chart ok 2608160724
+# edgar pdf output,ticker & email ok 2608161309
+# PROJECT DECLARED FAILED 2608161458
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime
+import gradio as gr
+
+# pdf related 2608111659
+from fpdf import FPDF
+import tempfile
+import os
+import re
+
+# sqlite 2608112002
+import sqlite3
+from datetime import datetime
+
+#  password related 2608121926
+# Add this at the top
+# import hashlib
+# import getpass
+
+# PASSWORD_FILE = "password_hash.txt"
+
+DB_FILE = "treasurer.db"
+# password related 2608121936
+
+import hashlib
+import os
+import json
+from datetime import datetime
+
+# import pyttsx3
+
+# ============================================
+# PASSWORD / ENCRYPTION
+# ============================================
+
+PASSWORD_FILE = "password_hash.txt"
+DATA_FILE = "treasurer.db"
+
+def hash_password(password):
+    """Hash a password using SHA-256."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def set_password(password):
+    """Set or change the password."""
+    if len(password) < 4:
+        return "❌ Password must be at least 4 characters."
+    
+    with open(PASSWORD_FILE, "w") as f:
+        f.write(hash_password(password))
+    return "✅ Password set successfully!"
+
+def check_password(entered_password):
+    """Check if the entered password is correct."""
+    if not os.path.exists(PASSWORD_FILE):
+        return True
+    try:
+        with open(PASSWORD_FILE, "r") as f:
+            stored_hash = f.read().strip()
+        return hash_password(entered_password) == stored_hash
+    except:
+        return False
+    
+def is_password_set():
+    """Check if a password has been set."""
+    return os.path.exists(PASSWORD_FILE)
+
+def password_protected(func):
+    """Decorator to protect functions with password."""
+    def wrapper(*args, **kwargs):
+        if not os.path.exists(PASSWORD_FILE):
+            return func(*args, **kwargs)
+        
+        # For Gradio, we'll handle password in the UI
+        return func(*args, **kwargs)
+    return wrapper
+
+# end password related 2608121936
+
+# edgar related functions and includes 2608150614
+# ============================================
+# EDGAR FUNCTIONS - ADD THIS BLOCK
+# ============================================
+
+try:
+    from edgar import set_identity, Company
+    EDGAR_AVAILABLE = True
+except ImportError:
+    EDGAR_AVAILABLE = False
+    print("⚠️ Edgar not installed. Install with: pip install edgar")
+
+if EDGAR_AVAILABLE:
+    set_identity("your_email@domain.com")  # Replace with your email
+    
+    
+    def get_company_summary(ticker):
+        """Get key financial metrics for a company."""
+        try:
+            company = Company(ticker.upper().strip())
+            financials = company.get_financials()
+            
+            income_df = financials.income_statement().to_dataframe()
+            balance_df = financials.balance_sheet().to_dataframe()
+            cashflow_df = financials.cashflow_statement().to_dataframe()
+            
+            def get_value(df, label):
+                try:
+                    for idx, row in df.iterrows():
+                        if label.lower() in str(row['label']).lower():
+                            for col in df.columns:
+                                if col.startswith('20'):
+                                    val = row[col]
+                                    if isinstance(val, (int, float)) and pd.notna(val):
+                                        return val
+                    return None
+                except:
+                    return None
+            
+            def get_first_value(df):
+                try:
+                    for col in df.columns:
+                        if col.startswith('20'):
+                            val = df[col].iloc[0]
+                            if isinstance(val, (int, float)) and pd.notna(val):
+                                return val
+                except:
+                    pass
+                return None
+            
+            def get_val(df, labels):
+                for label in labels:
+                    val = get_value(df, label)
+                    if val is not None:
+                        return val
+                return get_first_value(df)
+            
+            revenue = get_val(income_df, ['Net sales', 'Revenue', 'Total revenue'])
+            net_income = get_val(income_df, ['Net income', 'Net earnings', 'Profit'])
+            total_assets = get_val(balance_df, ['Total assets', 'Assets'])
+            total_liabilities = get_val(balance_df, ['Total liabilities', 'Liabilities'])
+            total_equity = get_val(balance_df, ['Total equity', 'Equity'])
+            operating_cash = get_val(cashflow_df, ['Cash generated by operating activities', 'Operating cash flow'])
+            
+            def fmt(val):
+                if val is None:
+                    return "N/A"
+                if isinstance(val, (int, float)):
+                    return f"${val/1e9:.2f}B"
+                return str(val)
+            
+            summary = f"📊 {ticker.upper()} Financial Summary\n"
+            summary += "=" * 40 + "\n"
+            summary += f"Revenue:          {fmt(revenue)}\n"
+            summary += f"Net Income:       {fmt(net_income)}\n"
+            summary += f"Total Assets:     {fmt(total_assets)}\n"
+            summary += f"Total Liabilities: {fmt(total_liabilities)}\n"
+            summary += f"Total Equity:     {fmt(total_equity)}\n"
+            summary += f"Operating Cash:   {fmt(operating_cash)}\n"
+            
+            return summary, income_df, balance_df, cashflow_df
+        except Exception as e:
+            return f"Error: {e}", None, None, None
+
+    def clean_edgar_dataframe(df):
+        """Clean and format Edgar DataFrame for display."""
+        try:
+            numeric_cols = [col for col in df.columns if col.startswith('20')]
+            if numeric_cols:
+                df = df.dropna(subset=numeric_cols, how='all')
+            
+            df = df[~df['concept'].str.contains('Abstract', case=False, na=False)]
+            df = df[~df['label'].str.contains('Abstract', case=False, na=False)]
+            df = df[~df['label'].str.endswith(':', na=False)]
+            
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = df[col].apply(
+                        lambda x: f"${x/1e9:,.2f}B" if isinstance(x, (int, float)) and pd.notna(x) else 'N/A'
+                    )
+            
+            result_df = df[['label'] + numeric_cols]
+            
+            output_lines = []
+            col_widths = {}
+            for col in result_df.columns:
+                max_width = max(len(str(col)), result_df[col].astype(str).map(len).max())
+                col_widths[col] = max(max_width + 2, 15)
+            
+            header = "  ".join([col.ljust(col_widths[col]) for col in result_df.columns])
+            output_lines.append(header)
+            output_lines.append("=" * len(header))
+            
+            for _, row in result_df.iterrows():
+                line = "  ".join([str(row[col]).ljust(col_widths[col]) for col in result_df.columns])
+                output_lines.append(line)
+            
+            return "\n".join(output_lines)
+        except Exception as e:
+            return f"Error formatting: {e}"
+
+    def analyze_edgar(ticker):
+        """Full Edgar analysis: summary + 3 statements."""
+        if not ticker:
+            return "Please enter a ticker.", "", "", ""
+        
+        try:
+            ticker = ticker.upper().strip()
+            summary, income_df, balance_df, cashflow_df = get_company_summary(ticker)
+            
+            if summary.startswith("Error"):
+                return summary, "", "", ""
+            
+            income_str = clean_edgar_dataframe(income_df) if income_df is not None else "Not available"
+            balance_str = clean_edgar_dataframe(balance_df) if balance_df is not None else "Not available"
+            cashflow_str = clean_edgar_dataframe(cashflow_df) if cashflow_df is not None else "Not available"
+            
+            return summary, income_str, balance_str, cashflow_str
+        except Exception as e:
+            return f"Error: {e}", "", "", ""
+
+    def compare_edgar(ticker1, ticker2):
+        """Compare two companies."""
+        if not ticker1 or not ticker2:
+            return "Please enter two tickers."
+        
+        try:
+            summary1, _, _, _ = get_company_summary(ticker1)
+            summary2, _, _, _ = get_company_summary(ticker2)
+            
+            result = f"📊 Company Comparison: {ticker1.upper()} vs {ticker2.upper()}\n"
+            result += "=" * 50 + "\n\n"
+            result += f"--- {ticker1.upper()} ---\n{summary1}\n\n"
+            result += f"--- {ticker2.upper()} ---\n{summary2}\n\n"
+            
+            return result
+        except Exception as e:
+            return f"Error: {e}"
+else:
+    # Stub functions if Edgar not installed
+    def analyze_edgar(ticker):
+        return "⚠️ Edgar not installed. Install with: pip install edgar", "", "", ""
+    
+    def compare_edgar(ticker1, ticker2):
+        return "⚠️ Edgar not installed. Install with: pip install edgar"
+
+# end edgar related
+
+# begin advanced edgar 260816
+
+# ============================================
+# ADVANCED EDGAR CHARTS - ADD THIS BLOCK
+# ============================================
+
+def get_edgar_trend_data(ticker, metric_type='revenue'):
+    """Get historical trend data for a company metric."""
+    try:
+        company = Company(ticker.upper().strip())
+        financials = company.get_financials()
+        
+        if metric_type == 'revenue':
+            df = financials.income_statement().to_dataframe()
+            metric_label = 'Revenue'
+        elif metric_type == 'net_income':
+            df = financials.income_statement().to_dataframe()
+            metric_label = 'Net Income'
+        elif metric_type == 'total_assets':
+            df = financials.balance_sheet().to_dataframe()
+            metric_label = 'Total Assets'
+        elif metric_type == 'total_liabilities':
+            df = financials.balance_sheet().to_dataframe()
+            metric_label = 'Total Liabilities'
+        elif metric_type == 'operating_cash':
+            df = financials.cashflow_statement().to_dataframe()
+            metric_label = 'Operating Cash Flow'
+        else:
+            return None, None, None
+        
+        # Find the metric row
+        years = []
+        values = []
+        
+        for idx, row in df.iterrows():
+            if metric_label.lower() in str(row['label']).lower():
+                for col in df.columns:
+                    if col.startswith('20'):
+                        try:
+                            val = float(row[col])
+                            if pd.notna(val):
+                                years.append(col[:4])
+                                values.append(val)
+                        except:
+                            pass
+                break
+        
+        if not years:
+            return None, None, None
+        
+        # Sort by year
+        sorted_data = sorted(zip(years, values))
+        years = [y for y, v in sorted_data]
+        values = [v for y, v in sorted_data]
+        
+        return years, values, metric_label
+        
+    except Exception as e:
+        print(f"Trend data error: {e}")
+        return None, None, None
+
+def create_trend_chart(ticker, metric_type='revenue'):
+    """Create a trend chart for a specific metric."""
+    years, values, label = get_edgar_trend_data(ticker, metric_type)
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    
+    if not years or not values:
+        ax.text(0.5, 0.5, f'No {metric_type} data available for {ticker.upper()}', 
+                ha='center', va='center', transform=ax.transAxes)
+        ax.set_title(f'{ticker.upper()} - {metric_type.replace("_", " ").title()}')
+        plt.tight_layout()
+        return fig
+    
+    ax.plot(years, values, marker='o', linestyle='-', linewidth=2, markersize=8, color='royalblue')
+    ax.fill_between(years, 0, values, alpha=0.2, color='royalblue')
+    
+    ax.set_xlabel('Year')
+    ax.set_ylabel(f'{label} ($B)')
+    ax.set_title(f'{ticker.upper()} - {label} Trend')
+    ax.grid(True, alpha=0.3)
+    
+    # Format y-axis to show billions
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x/1e9:.1f}B'))
+    
+    # Add value labels on points
+    for i, (year, val) in enumerate(zip(years, values)):
+        ax.annotate(f'${val/1e9:.1f}B', (year, val), 
+                   textcoords="offset points", xytext=(0, 10), ha='center')
+    
+    plt.tight_layout()
+    return fig
+
+def create_edgar_comparison_chart(ticker1, ticker2, metric_type='revenue'):
+    """Compare two companies on a single metric."""
+    years1, values1, label1 = get_edgar_trend_data(ticker1, metric_type)
+    years2, values2, label2 = get_edgar_trend_data(ticker2, metric_type)
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    
+    if years1 and values1:
+        ax.plot(years1, values1, marker='o', linestyle='-', linewidth=2, 
+                label=ticker1.upper(), markersize=8, color='royalblue')
+        # Add value labels
+        for year, val in zip(years1, values1):
+            ax.annotate(f'${val/1e9:.1f}B', (year, val), 
+                       textcoords="offset points", xytext=(0, 10), ha='center')
+    
+    if years2 and values2:
+        ax.plot(years2, values2, marker='s', linestyle='-', linewidth=2, 
+                label=ticker2.upper(), markersize=8, color='darkorange')
+        for year, val in zip(years2, values2):
+            ax.annotate(f'${val/1e9:.1f}B', (year, val), 
+                       textcoords="offset points", xytext=(0, -15), ha='center')
+    
+    if not years1 and not years2:
+        ax.text(0.5, 0.5, f'No data available for comparison', 
+                ha='center', va='center', transform=ax.transAxes)
+        ax.set_title(f'Comparison: {ticker1.upper()} vs {ticker2.upper()}')
+        plt.tight_layout()
+        return fig
+    
+    ax.set_xlabel('Year')
+    ax.set_ylabel(f'{label1 if label1 else metric_type} ($B)')
+    ax.set_title(f'Comparison: {ticker1.upper()} vs {ticker2.upper()} - {label1 if label1 else metric_type}')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x/1e9:.1f}B'))
+    
+    plt.tight_layout()
+    return fig
+
+def analyze_edgar_with_charts(ticker):
+    """Full Edgar analysis with charts."""
+    if not ticker:
+        return "Please enter a ticker.", "", "", "", None, None, None
+    
+    try:
+        ticker = ticker.upper().strip()
+        summary, income_df, balance_df, cashflow_df = get_company_summary(ticker)
+        
+        if summary.startswith("Error"):
+            return summary, "", "", "", None, None, None
+        
+        income_str = clean_edgar_dataframe(income_df) if income_df is not None else "Not available"
+        balance_str = clean_edgar_dataframe(balance_df) if balance_df is not None else "Not available"
+        cashflow_str = clean_edgar_dataframe(cashflow_df) if cashflow_df is not None else "Not available"
+        
+        # Create trend charts
+        chart_revenue = create_trend_chart(ticker, 'revenue')
+        chart_net_income = create_trend_chart(ticker, 'net_income')
+        chart_assets = create_trend_chart(ticker, 'total_assets')
+        
+        return summary, income_str, balance_str, cashflow_str, chart_revenue, chart_net_income, chart_assets
+        
+    except Exception as e:
+        return f"Error: {e}", "", "", "", None, None, None
+
+def compare_edgar_with_charts(ticker1, ticker2):
+    """Compare two companies with charts."""
+    if not ticker1 or not ticker2:
+        return "Please enter two tickers.", None, None, None
+    
+    try:
+        summary1, _, _, _ = get_company_summary(ticker1)
+        summary2, _, _, _ = get_company_summary(ticker2)
+        
+        result = f"📊 Company Comparison: {ticker1.upper()} vs {ticker2.upper()}\n"
+        result += "=" * 50 + "\n\n"
+        result += f"--- {ticker1.upper()} ---\n{summary1}\n\n"
+        result += f"--- {ticker2.upper()} ---\n{summary2}\n\n"
+        
+        # Create comparison charts
+        chart_revenue = create_edgar_comparison_chart(ticker1, ticker2, 'revenue')
+        chart_net_income = create_edgar_comparison_chart(ticker1, ticker2, 'net_income')
+        chart_assets = create_edgar_comparison_chart(ticker1, ticker2, 'total_assets')
+        
+        return result, chart_revenue, chart_net_income, chart_assets
+        
+    except Exception as e:
+        return f"Error: {e}", None, None, None
+# end advanced edgar
+# replacing 2608161256
+def create_edgar_pdf_report(ticker, summary, income_str, balance_str, cashflow_str, chart_figs, filename="edgar_report.pdf"):
+    """Create a PDF report for Edgar analysis with character cleanup."""
+    from fpdf import FPDF
+    import tempfile
+    import os
+    from datetime import datetime
+    from PIL import Image
+    import io
+    import re
+    
+    # --- CLEAN TEXT FUNCTION ---
+    def clean_text_for_pdf(text):
+        """Remove emojis and special characters for PDF."""
+        if text is None:
+            return ""
+        
+        # Remove emojis
+        emoji_pattern = re.compile("["
+            u"\U0001F600-\U0001F64F"
+            u"\U0001F300-\U0001F5FF"
+            u"\U0001F680-\U0001F6FF"
+            u"\U0001F700-\U0001F77F"
+            u"\U0001F780-\U0001F7FF"
+            u"\U0001F800-\U0001F8FF"
+            u"\U0001F900-\U0001F9FF"
+            u"\U0001FA00-\U0001FA6F"
+            u"\U0001FA70-\U0001FAFF"
+            u"\U00002702-\U000027B0"
+            u"\U000024C2-\U0001F251"
+            "]+", flags=re.UNICODE)
+        text = emoji_pattern.sub('', text)
+        
+        # Replace common special characters
+        replacements = {
+            '•': '-',
+            '★': '*',
+            '✓': '[OK]',
+            '✗': '[X]',
+            '→': '->',
+            '←': '<-',
+            '📊': '',
+            '💰': '',
+            '📈': '',
+            '📋': '',
+            '⚠️': '[WARNING]',
+            '✅': '[OK]',
+            '❌': '[ERROR]',
+            '📁': '',
+            '📂': '',
+            '🤖': '[AI]',
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        
+        # Remove any remaining non-ASCII characters
+        text = text.encode('ascii', 'ignore').decode('ascii')
+        
+        return text.strip()
+    
+    pdf = FPDF()
+    
+    # --- PAGE 1: Company Summary ---
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=12)
+    
+    # Title
+    pdf.set_font("Helvetica", size=16, style='B')
+    pdf.cell(0, 10, f"Dozen133 - {ticker.upper()} Financial Report", ln=True, align='C')
+    pdf.ln(5)
+    
+    # Date
+    pdf.set_font("Helvetica", size=10)
+    pdf.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align='R')
+    pdf.ln(5)
+    
+    # Summary - CLEANED
+    pdf.set_font("Helvetica", size=12)
+    for line in summary.split('\n'):
+        if line.strip():
+            clean_line = clean_text_for_pdf(line)
+            if clean_line.strip():
+                if '=' in clean_line or '-' in clean_line:
+                    pdf.cell(0, 5, clean_line, ln=True)
+                elif clean_line.startswith(ticker.upper()):
+                    pdf.set_font("Helvetica", size=12, style='B')
+                    pdf.cell(0, 7, clean_line, ln=True)
+                    pdf.set_font("Helvetica", size=12)
+                else:
+                    pdf.cell(0, 7, clean_line, ln=True)
+    
+    pdf.ln(5)
+    
+    # --- PAGE 2: Financial Statements ---
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=14, style='B')
+    pdf.cell(0, 10, "Financial Statements", ln=True, align='C')
+    pdf.ln(5)
+    
+    pdf.set_font("Helvetica", size=12, style='B')
+    pdf.cell(0, 10, "Income Statement", ln=True)
+    pdf.set_font("Helvetica", size=10)
+    for line in income_str.split('\n'):
+        if line.strip():
+            clean_line = clean_text_for_pdf(line)
+            if clean_line.strip():
+                pdf.cell(0, 5, clean_line, ln=True)
+    pdf.ln(5)
+    
+    pdf.set_font("Helvetica", size=12, style='B')
+    pdf.cell(0, 10, "Balance Sheet", ln=True)
+    pdf.set_font("Helvetica", size=10)
+    for line in balance_str.split('\n'):
+        if line.strip():
+            clean_line = clean_text_for_pdf(line)
+            if clean_line.strip():
+                pdf.cell(0, 5, clean_line, ln=True)
+    pdf.ln(5)
+    
+    pdf.set_font("Helvetica", size=12, style='B')
+    pdf.cell(0, 10, "Cash Flow Statement", ln=True)
+    pdf.set_font("Helvetica", size=10)
+    for line in cashflow_str.split('\n'):
+        if line.strip():
+            clean_line = clean_text_for_pdf(line)
+            if clean_line.strip():
+                pdf.cell(0, 5, clean_line, ln=True)
+    
+    # --- PAGE 3: Charts ---
+    if chart_figs:
+        pdf.add_page()
+        pdf.set_font("Helvetica", size=14, style='B')
+        pdf.cell(0, 10, "Trend Charts", ln=True, align='C')
+        pdf.ln(5)
+        
+        temp_files = []
+        for fig in chart_figs:
+            if fig is not None:
+                fig.patch.set_facecolor('white')
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', dpi=100, bbox_inches='tight', 
+                           facecolor='white', edgecolor='none')
+                buf.seek(0)
+                img = Image.open(buf)
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                img.save(temp_file.name, 'PNG')
+                temp_files.append(temp_file.name)
+                plt.close(fig)
+        
+        y_pos = 40
+        for i, img_path in enumerate(temp_files):
+            if i == 0:
+                pdf.image(img_path, x=10, y=y_pos, w=190, h=75)
+                y_pos += 85
+            elif i == 1:
+                pdf.image(img_path, x=10, y=y_pos, w=190, h=75)
+                y_pos += 85
+            elif i == 2:
+                pdf.image(img_path, x=10, y=y_pos, w=190, h=75)
+        
+        for path in temp_files:
+            try:
+                os.remove(path)
+            except:
+                pass
+    
+    pdf.output(filename)
+    return filename
+# 
+#export_edgar_pdf
+def export_edgar_pdf(ticker):
+    """Export Edgar analysis as PDF."""
+    if not ticker:
+        return "Please enter a ticker.", None
+    
+    try:
+        ticker = ticker.upper().strip()
+        summary, income_df, balance_df, cashflow_df = get_company_summary(ticker)
+        
+        if summary.startswith("Error"):
+            return summary, None
+        
+        income_str = clean_edgar_dataframe(income_df) if income_df is not None else "Not available"
+        balance_str = clean_edgar_dataframe(balance_df) if balance_df is not None else "Not available"
+        cashflow_str = clean_edgar_dataframe(cashflow_df) if cashflow_df is not None else "Not available"
+        
+        # Create charts
+        chart_revenue = create_trend_chart(ticker, 'revenue')
+        chart_net_income = create_trend_chart(ticker, 'net_income')
+        chart_assets = create_trend_chart(ticker, 'total_assets')
+        chart_figs = [chart_revenue, chart_net_income, chart_assets]
+        
+        # Create PDF
+        pdf_path = create_edgar_pdf_report(ticker, summary, income_str, balance_str, cashflow_str, chart_figs)
+        
+        return f"✅ PDF generated for {ticker.upper()}", pdf_path
+    except Exception as e:
+        return f"Error: {e}", None
+#
+
+ 
+# edgar history and email
+# ============================================
+# EDGAR EMAIL HISTORY - ADD THIS
+# ============================================
+
+EDGAR_HISTORY_FILE = "edgar_history.json"
+
+def save_edgar_ticker(ticker, email=""):
+    """Save ticker and optional email to history."""
+    try:
+        history = []
+        if os.path.exists(EDGAR_HISTORY_FILE):
+            with open(EDGAR_HISTORY_FILE, 'r') as f:
+                history = json.load(f)
+        
+        # Add new entry (avoid duplicates)
+        entry = {"ticker": ticker.upper().strip(), "email": email, "date": datetime.now().strftime("%Y-%m-%d %H:%M")}
+        
+        # Remove if exists
+        history = [h for h in history if h["ticker"] != ticker.upper().strip()]
+        history.insert(0, entry)
+        
+        # Keep only last 50
+        history = history[:50]
+        
+        with open(EDGAR_HISTORY_FILE, 'w') as f:
+            json.dump(history, f, indent=2)
+        
+        return f"✅ Saved {ticker.upper()}"
+    except Exception as e:
+        return f"❌ Error: {e}"
+
+def get_edgar_history():
+    """Get saved Edgar history."""
+    try:
+        if os.path.exists(EDGAR_HISTORY_FILE):
+            with open(EDGAR_HISTORY_FILE, 'r') as f:
+                return json.load(f)
+        return []
+    except:
+        return []
+
+def delete_edgar_ticker(ticker):
+    """Delete a ticker from history."""
+    try:
+        history = get_edgar_history()
+        history = [h for h in history if h["ticker"] != ticker.upper().strip()]
+        with open(EDGAR_HISTORY_FILE, 'w') as f:
+            json.dump(history, f, indent=2)
+        return f"🗑️ Removed {ticker.upper()}"
+    except Exception as e:
+        return f"❌ Error: {e}"
+# en edgar history and email
+
+def init_db():
+    """Create the database and table if they don't exist."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS transactions
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  date TEXT,
+                  time TEXT,
+                  item TEXT,
+                  price REAL,
+                  qty INTEGER,
+                  amount REAL,
+                  income REAL,
+                  category TEXT)''')
+    conn.commit()
+    conn.close()
+    print("✅ Database initialized.")
+    
+def add_receipt_column():
+    """Add receipt_path column to transactions if it doesn't exist."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    # Check if column exists
+    c.execute("PRAGMA table_info(transactions)")
+    columns = [col[1] for col in c.fetchall()]
+    
+    if 'receipt_path' not in columns:
+        c.execute("ALTER TABLE transactions ADD COLUMN receipt_path TEXT")
+        conn.commit()
+        print("✅ Added receipt_path column")
+    else:
+        print("ℹ️ receipt_path already exists")
+    
+    conn.close()
+
+def create_receipts_table(): #2608151138
+    """Create receipts table if it doesn't exist."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS receipts
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  transaction_id INTEGER,
+                  filename TEXT,
+                  filepath TEXT,
+                  upload_date TEXT)''')
+    conn.commit()
+    conn.close()
+    print("✅ Receipts table initialized")
+
+
+# Initialize the database when the app starts
+init_db()
+# Call this after init_db()
+add_receipt_column()
+create_receipts_table()
+
+# Create receipts folder
+os.makedirs("receipts", exist_ok=True)
+
+
+# end sqlite init
+# ============================================
+# ACCOUNT FUNCTIONS - ADD THIS BLOCK
+# ============================================
+
+def init_accounts_table():
+    """Create accounts table if it doesn't exist."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS accounts
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT UNIQUE,
+                  type TEXT,
+                  balance REAL,
+                  currency TEXT DEFAULT 'USD',
+                  created_date TEXT)''')
+    conn.commit()
+    conn.close()
+    print("✅ Accounts table initialized.")
+
+# Run this after init_db()
+init_accounts_table()
+
+def add_account(name, account_type, balance, currency="USD"):
+    """Add a new account."""
+    if not name:
+        return "❌ Account name is required."
+    
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("""INSERT INTO accounts (name, type, balance, currency, created_date)
+                     VALUES (?, ?, ?, ?, ?)""",
+                  (name, account_type, float(balance), currency, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+        return f"✅ Account '{name}' added successfully!"
+    except sqlite3.IntegrityError:
+        return f"❌ Account '{name}' already exists."
+    except Exception as e:
+        return f"❌ Error: {e}"
+
+def get_accounts():
+    """Get all accounts as DataFrame."""
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query("SELECT id, name, type, balance, currency FROM accounts ORDER BY name", conn)
+    conn.close()
+    return df
+
+def get_account_balance(account_name):
+    """Get balance for a specific account."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT balance FROM accounts WHERE name=?", (account_name,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def update_account_balance(account_name, new_balance):
+    """Update account balance."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE accounts SET balance=? WHERE name=?", (float(new_balance), account_name))
+    conn.commit()
+    conn.close()
+    return f"✅ Updated balance for '{account_name}'"
+
+def delete_account(account_name):
+    """Delete an account."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM accounts WHERE name=?", (account_name,))
+    conn.commit()
+    conn.close()
+    return f"🗑️ Deleted account '{account_name}'"
+
+
+# step 2 sqlite functions
+def add_transaction(date, time, item, price, qty, amount, income, category):
+    """Add a transaction to the database."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""INSERT INTO transactions 
+                 (date, time, item, price, qty, amount, income, category) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+              (date, time, item, price, qty, amount, income, category))
+    conn.commit()
+    conn.close()
+    return f"✅ Added: {item} - ${amount:.2f}"
+
+def get_transactions_as_df():
+    """Get all transactions as a DataFrame for analysis."""
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query("SELECT date, time, item, amount, income, category FROM transactions", conn)
+    conn.close()
+    return df
+
+def get_recent_transactions(limit=10):
+    """Get the most recent transactions."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT date, time, item, amount, category FROM transactions ORDER BY id DESC LIMIT ?", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+# --- Modify existing add_transaction to update account balance --- 2608150836
+def add_transaction_with_account(date, time, item, price, qty, amount, income, category, account_name=""):
+    """Add a transaction and update account balance."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    # Add transaction
+    c.execute("""INSERT INTO transactions 
+                 (date, time, item, price, qty, amount, income, category) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+              (date, time, item, price, qty, amount, income, category))
+    conn.commit()
+    
+    # Update account balance if account specified
+    if account_name:
+        if income > 0:
+            c.execute("UPDATE accounts SET balance = balance + ? WHERE name=?", (float(income), account_name))
+        else:
+            c.execute("UPDATE accounts SET balance = balance - ? WHERE name=?", (float(amount), account_name))
+        conn.commit()
+    
+    conn.close()
+    return f"✅ Added: {item} - ${amount:.2f}"
+
+# end sqlite functions
+
+# backup recover related
+# ============================================
+# BACKUP & RECOVERY - ADD THIS BLOCK
+# ============================================
+
+import json
+import shutil
+def backup_database():
+    """Backup the database to a JSON file."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        # Only backup the core columns that always exist
+        df = pd.read_sql_query("SELECT date, time, item, price, qty, amount, income, category FROM transactions", conn)
+        conn.close()
+        
+        # Convert any NaN to None for JSON serialization
+        df = df.where(pd.notnull(df), None)
+        
+        backup_file = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        df.to_json(backup_file, orient='records', indent=2)
+        return backup_file
+    except Exception as e:
+        return f"❌ Backup failed: {e}"
+    
+# 2608161436
+
+        
+
+    
+def restore_database(backup_file):
+    """Restore the database from a JSON backup file."""
+    if not backup_file:
+        return "❌ No file selected."
+    
+    try:
+        # Read the backup
+        df = pd.read_json(backup_file)
+        
+        if df.empty:
+            return "❌ Backup file is empty."
+        
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        # Clear existing data
+        c.execute("DELETE FROM transactions")
+        
+        # Insert each row using string formatting (bypasses binding issues)
+        count = 0
+        for _, row in df.iterrows():
+            # Convert EVERYTHING to string and escape quotes
+            def safe_str(val):
+                if val is None or pd.isna(val):
+                    return "''"  # Empty string
+                # Convert to string and escape single quotes
+                return "'" + str(val).replace("'", "''") + "'"
+            
+            date_val = safe_str(row.get('date', ''))
+            time_val = safe_str(row.get('time', ''))
+            item_val = safe_str(row.get('item', ''))
+            price_val = safe_str(row.get('price', 0))
+            qty_val = safe_str(row.get('qty', 1))
+            amount_val = safe_str(row.get('amount', 0))
+            income_val = safe_str(row.get('income', 0))
+            category_val = safe_str(row.get('category', 'Other'))
+            
+            # Build the INSERT statement as a string
+            sql = f"""
+                INSERT INTO transactions 
+                (date, time, item, price, qty, amount, income, category) 
+                VALUES ({date_val}, {time_val}, {item_val}, {price_val}, {qty_val}, {amount_val}, {income_val}, {category_val})
+            """
+            
+            c.execute(sql)
+            count += 1
+        
+        conn.commit()
+        conn.close()
+        return f"✅ Restored {count} records from {backup_file}"
+    except Exception as e:
+        return f"❌ Restore failed: {e}"
+    
+# new 2608161438
+# end old4
+
+
+
+        
+    
+    
+#Backup columns: ['id', 'date', 'time', 'item', 'price', 'qty', 'amount', 'income', 'category', 'account', 'receipt_path', 'notes']
+# Table columns: ['id', 'date', 'time', 'item', 'price', 'qty', 'amount', 'income', 'category', 'account', 'receipt_path', 'notes']
+#
+               
+
+# end old4
+# new 2608161429 replaced 2608161437
+
+
+# end old3
+
+
+# replaced 2608161429
+
+      
+# end old2
+
+def get_backup_list():
+    """Get list of available backup files."""
+    try:
+        files = [f for f in os.listdir('.') if f.startswith('backup_') and f.endswith('.json')]
+        files.sort(reverse=True)
+        return files
+    except:
+        return []
+# end backup recover related
+# encryption related 2608161342
+# ============================================
+# ENCRYPTION FUNCTIONS - ADD THIS BLOCK
+# ============================================
+
+try:
+    from cryptography.fernet import Fernet
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
+    print("⚠️ cryptography not installed. Install with: pip install cryptography")
+
+ENCRYPTION_KEY_FILE = "encryption_key.key"
+
+def generate_encryption_key():
+    """Generate a new encryption key."""
+    if not CRYPTO_AVAILABLE:
+        return "❌ cryptography library not installed."
+    
+    try:
+        key = Fernet.generate_key()
+        with open(ENCRYPTION_KEY_FILE, "wb") as f:
+            f.write(key)
+        return "✅ Encryption key generated."
+    except Exception as e:
+        return f"❌ Error: {e}"
+
+def load_encryption_key():
+    """Load the encryption key."""
+    if not CRYPTO_AVAILABLE:
+        return None
+    
+    if os.path.exists(ENCRYPTION_KEY_FILE):
+        with open(ENCRYPTION_KEY_FILE, "rb") as f:
+            return f.read()
+    return generate_encryption_key()
+
+def encrypt_database():
+    """Encrypt the SQLite database."""
+    if not CRYPTO_AVAILABLE:
+        return "❌ cryptography library not installed. Install with: pip install cryptography"
+    
+    if not os.path.exists(DB_FILE):
+        return "❌ Database not found."
+    
+    try:
+        key = load_encryption_key()
+        if key is None:
+            return "❌ Could not load encryption key."
+        
+        fernet = Fernet(key)
+        
+        with open(DB_FILE, "rb") as f:
+            data = f.read()
+        
+        encrypted = fernet.encrypt(data)
+        
+        # Backup original
+        shutil.copy2(DB_FILE, DB_FILE + ".backup")
+        
+        # Write encrypted
+        with open(DB_FILE + ".encrypted", "wb") as f:
+            f.write(encrypted)
+        
+        # Remove unencrypted
+        os.remove(DB_FILE)
+        
+        return "✅ Database encrypted successfully!"
+    except Exception as e:
+        return f"❌ Encryption failed: {e}"
+
+def decrypt_database():
+    """Decrypt the SQLite database."""
+    if not CRYPTO_AVAILABLE:
+        return "❌ cryptography library not installed. Install with: pip install cryptography"
+    
+    encrypted_file = DB_FILE + ".encrypted"
+    if not os.path.exists(encrypted_file):
+        return "❌ No encrypted database found."
+    
+    try:
+        key = load_encryption_key()
+        if key is None:
+            return "❌ Could not load encryption key."
+        
+        fernet = Fernet(key)
+        
+        with open(encrypted_file, "rb") as f:
+            data = f.read()
+        
+        decrypted = fernet.decrypt(data)
+        
+        with open(DB_FILE, "wb") as f:
+            f.write(decrypted)
+        
+        return "✅ Database decrypted successfully!"
+    except Exception as e:
+        return f"❌ Decryption failed: {e}"
+
+def check_encryption_status():
+    """Check if database is encrypted."""
+    if os.path.exists(DB_FILE + ".encrypted"):
+        return "🔒 Database is encrypted"
+    elif os.path.exists(DB_FILE):
+        return "🔓 Database is not encrypted"
+    else:
+        return "❌ Database not found"
+
+def get_key_status():
+    """Check if encryption key exists."""
+    if os.path.exists(ENCRYPTION_KEY_FILE):
+        return "✅ Encryption key exists"
+    else:
+        return "⚠️ No encryption key found. Generate one first."
+# end encryption related
+# ============================================
+# RECEIPT UPLOAD FUNCTION - ADD THIS
+# ============================================
+# 2608151146
+def upload_receipt_file(transaction_id, file):
+    """Upload a receipt file and save to database."""
+    if file is None:
+        return "❌ No file selected"
+    
+    if not transaction_id or transaction_id <= 0:
+        return "❌ Invalid transaction ID"
+    
+    try:
+        # Get file extension
+        original_name = file.name if hasattr(file, 'name') else str(file)
+        ext = os.path.splitext(original_name)[1] if '.' in original_name else '.jpg'
+        
+        # Create unique filename
+        filename = f"receipt_{transaction_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+        filepath = os.path.join("receipts", filename)
+        
+        # Save the file
+        with open(filepath, "wb") as f:
+            f.write(file.read())
+        
+        # Update database
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("UPDATE transactions SET receipt_path=? WHERE id=?", (filepath, transaction_id))
+        c.execute("""INSERT INTO receipts (transaction_id, filename, filepath, upload_date)
+                     VALUES (?, ?, ?, ?)""",
+                  (transaction_id, filename, filepath, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+        
+        return f"✅ Receipt saved: {filename}"
+    except Exception as e:
+        return f"❌ Error: {e}"
+
+# pdf related functions
+
+def clean_text(text):
+    """Remove ALL non-ASCII characters. No exceptions."""
+    if text is None:
+        return ""
+    
+    # Convert to string
+    text = str(text)
+    
+    # Remove ALL non-ASCII characters (including em dash, smart quotes, etc.)
+    # This is a brute-force approach that ALWAYS works
+    text = text.encode('ascii', 'ignore').decode('ascii')
+    
+    # Replace common characters that might still cause issues
+    replacements = {
+        '•': '-',
+        '★': '*',
+        '✓': '[OK]',
+        '✗': '[X]',
+        '→': '->',
+        '←': '<-',
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    
+    return text
+# 2608152301 for firefox rgb mode
+def create_pdf_report(summary_text, warnings_text, chart_figs, filename="spending_report.pdf"):
+    """Create a two-page PDF report with summary, warnings, and charts."""
+    from fpdf import FPDF
+    import tempfile
+    import os
+    from datetime import datetime
+    from PIL import Image
+    import io
+    
+    pdf = FPDF()
+    
+    # --- PAGE 1: Summary and Warnings ---
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    
+    # Title
+    pdf.set_font("Arial", size=16, style='B')
+    pdf.cell(0, 10, "Dozen133 Mini - Spending Report", ln=True, align='C')
+    pdf.ln(5)
+    
+    # Date
+    pdf.set_font("Arial", size=10)
+    pdf.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align='R')
+    pdf.ln(5)
+    
+    # Summary
+    pdf.set_font("Arial", size=14, style='B')
+    pdf.cell(0, 10, "Summary", ln=True)
+    pdf.set_font("Arial", size=12)
+    for line in summary_text.split('\n'):
+        if line.strip():
+            pdf.cell(0, 8, line, ln=True)
+    pdf.ln(5)
+    
+    # Warnings
+    pdf.set_font("Arial", size=14, style='B')
+    pdf.cell(0, 10, "Warnings", ln=True)
+    pdf.set_font("Arial", size=12)
+    for line in warnings_text.split('\n'):
+        if line.strip():
+            pdf.cell(0, 8, line, ln=True)
+    pdf.ln(5)
+    
+    # --- PAGE 2: Charts ---
+    pdf.add_page()
+    pdf.set_font("Arial", size=14, style='B')
+    pdf.cell(0, 10, "Spending Charts", ln=True, align='C')
+    pdf.ln(5)
+    
+    # Save charts as RGB images (Firefox fix)
+    temp_files = []
+    for fig in chart_figs[:3]:
+        if fig is not None:
+            # Set white background
+            fig.patch.set_facecolor('white')
+            
+            # Save to BytesIO
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=100, bbox_inches='tight', 
+                       facecolor='white', edgecolor='none')
+            buf.seek(0)
+            
+            # Convert to RGB (fixes Firefox black PDF issue)
+            img = Image.open(buf)
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Save as temp file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+            img.save(temp_file.name, 'PNG')
+            temp_files.append(temp_file.name)
+            plt.close(fig)
+    
+    # Place charts
+    y_pos = 40
+    
+    if len(temp_files) >= 2:
+        pdf.image(temp_files[0], x=10, y=y_pos, w=90, h=75)
+        pdf.image(temp_files[1], x=105, y=y_pos, w=90, h=75)
+        y_pos += 85
+    
+    if len(temp_files) >= 3:
+        pdf.image(temp_files[2], x=10, y=y_pos, w=190, h=80)
+    
+    # Clean up
+    for path in temp_files:
+        try:
+            os.remove(path)
+        except:
+            pass
+    
+    pdf.output(filename)
+    return filename
+
+# 2608152226 replacement  replaced for firefox rgb 2608152300
+
+  
+# end oldb4rgb
+
+
+
+# end pdf related functions 2608111659
+
+# ai insights pdf function 2608160801
+# ============================================
+# AI INSIGHTS PDF - ADD THIS
+# ============================================
+def create_ai_pdf_report(insights_text, chart_figs, filename="ai_insights_report.pdf"):
+    """Create a PDF report from AI insights."""
+    from fpdf import FPDF
+    import tempfile
+    import os
+    from datetime import datetime
+    from PIL import Image
+    import io
+    import re
+    
+    # --- CLEAN TEXT: Remove emojis and special characters ---
+    def clean_text_for_pdf(text):
+        """Remove emojis and special characters for PDF."""
+        if text is None:
+            return ""
+        
+        # Remove emojis
+        emoji_pattern = re.compile("["
+            u"\U0001F600-\U0001F64F"  # emoticons
+            u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+            u"\U0001F680-\U0001F6FF"  # transport & map symbols
+            u"\U0001F700-\U0001F77F"  # alchemical symbols
+            u"\U0001F780-\U0001F7FF"  # Geometric Shapes Extended
+            u"\U0001F800-\U0001F8FF"  # Supplemental Arrows-C
+            u"\U0001F900-\U0001F9FF"  # Supplemental Symbols and Pictographs
+            u"\U0001FA00-\U0001FA6F"  # Chess Symbols
+            u"\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
+            u"\U00002702-\U000027B0"  # Dingbats
+            u"\U000024C2-\U0001F251" 
+            "]+", flags=re.UNICODE)
+        text = emoji_pattern.sub('', text)
+        
+        # Replace common special characters
+        replacements = {
+            '•': '-',
+            '★': '*',
+            '✓': '[OK]',
+            '✗': '[X]',
+            '→': '->',
+            '←': '<-',
+            '📊': '',
+            '💰': '',
+            '📈': '',
+            '📋': '',
+            '⚠️': '[WARNING]',
+            '✅': '[OK]',
+            '❌': '[ERROR]',
+            '📁': '',
+            '📂': '',
+            '🤖': '[AI]',
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        
+        # Remove any remaining non-ASCII characters
+        text = text.encode('ascii', 'ignore').decode('ascii')
+        
+        return text.strip()
+    
+    pdf = FPDF()
+    
+    # --- PAGE 1: Insights Summary ---
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=12)
+    
+    # Title
+    pdf.set_font("Helvetica", size=16, style='B')
+    pdf.cell(0, 10, "Dozen133 - AI Insights Report", ln=True, align='C')
+    pdf.ln(5)
+    
+    # Date
+    pdf.set_font("Helvetica", size=10)
+    pdf.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align='R')
+    pdf.ln(5)
+    
+    # Insights content - CLEANED
+    pdf.set_font("Helvetica", size=12)
+    for line in insights_text.split('\n'):
+        if line.strip():
+            clean_line = clean_text_for_pdf(line)
+            if clean_line.strip():
+                # Check if it's a header (starts with certain patterns)
+                if clean_line.startswith('COMBINED') or clean_line.startswith('EXCEL') or clean_line.startswith('SQLITE') or clean_line.startswith('OVERALL'):
+                    pdf.set_font("Helvetica", size=12, style='B')
+                    pdf.cell(0, 8, clean_line, ln=True)
+                    pdf.set_font("Helvetica", size=12)
+                elif clean_line.startswith('==') or clean_line.startswith('--'):
+                    pdf.cell(0, 5, clean_line, ln=True)
+                else:
+                    pdf.cell(0, 7, clean_line, ln=True)
+    pdf.ln(5)
+    
+    # --- PAGE 2: Charts ---
+    if chart_figs:
+        pdf.add_page()
+        pdf.set_font("Helvetica", size=14, style='B')
+        pdf.cell(0, 10, "Spending Charts", ln=True, align='C')
+        pdf.ln(5)
+        
+        temp_files = []
+        for fig in chart_figs[:3]:
+            if fig is not None:
+                fig.patch.set_facecolor('white')
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', dpi=100, bbox_inches='tight', 
+                           facecolor='white', edgecolor='none')
+                buf.seek(0)
+                img = Image.open(buf)
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                img.save(temp_file.name, 'PNG')
+                temp_files.append(temp_file.name)
+                plt.close(fig)
+        
+        y_pos = 40
+        for i, img_path in enumerate(temp_files):
+            if i == 0:
+                pdf.image(img_path, x=10, y=y_pos, w=190, h=75)
+                y_pos += 85
+            elif i == 1:
+                pdf.image(img_path, x=10, y=y_pos, w=190, h=75)
+                y_pos += 85
+            elif i == 2:
+                pdf.image(img_path, x=10, y=y_pos, w=190, h=75)
+        
+        for path in temp_files:
+            try:
+                os.remove(path)
+            except:
+                pass
+    
+    pdf.output(filename)
+    return filename
+
+
+
+
+
+# ============================================
+# DATA LOADING AND CATEGORIZATION
+# ============================================
+
+def load_and_categorize(file):
+    """Load Excel, categorize expenses, compute daily totals."""
+    df = pd.read_excel(file.name)
+    
+    # --- Categorization Rules ---
+    def categorize(item):
+        item_lower = str(item).lower()
+        if item_lower in ['bus', 'metro', 'taxi']:
+            return 'Traffic'
+        elif item_lower in ['breakfast', 'lunch', 'food']:
+            return 'Food'
+        elif item_lower in ['dividend', 'salary']:
+            return 'Income'
+        elif item_lower in ['insurance', 'rent', 'utilities']:
+            return 'Expenses'
+        else:
+            return 'Other'
+    
+    df['Category'] = df['Item'].apply(categorize)
+    
+    # --- Daily Summary ---
+    df['Date'] = pd.to_datetime(df['Date'])
+    daily = df.groupby('Date').agg({
+        'Amount': 'sum',
+        'Income': 'sum'
+    }).fillna(0)
+    daily['Net'] = daily['Income'] - daily['Amount']
+    daily['Cumulative'] = daily['Net'].cumsum()
+    
+    return df, daily
+# chart functions replaced 2608111834
+
+def create_line_chart(daily):
+    fig, ax = plt.subplots(figsize=(8, 4))  # Wider, shorter for PDF
+   # --- ADD WHITE BACKGROUND ---
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    # --- END --- 
+    
+    ax.plot(daily.index, daily['Cumulative'], marker='o', linestyle='-', label='Cumulative Net', markersize=3)
+    ax.axhline(y=0, color='red', linestyle='--', alpha=0.5)
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Cumulative Balance ($)')
+    ax.set_title('Net Balance Over Time')
+    ax.grid(True,alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    return fig
+
+def create_pie_chart(df):
+    cat_totals = df[df['Category'] != 'Income'].groupby('Category')['Amount'].sum()
+    if cat_totals.empty:
+        fig, ax = plt.subplots(figsize=(6, 6))
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('white')
+        ax.text(0.5, 0.5, 'No spending data', ha='center', va='center')
+        return fig
+
+    fig, ax = plt.subplots(figsize=(6, 6))  # Square for pie chart
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    
+    ax.pie(cat_totals, labels=cat_totals.index, autopct='%1.1f%%', startangle=90)
+    ax.set_title('Spending by Category')
+    plt.tight_layout()
+    return fig
+
+def create_bar_chart(df):
+    cat_totals = df[df['Category'] != 'Income'].groupby('Category')['Amount'].sum().sort_values(ascending=False)
+    if cat_totals.empty:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('white')
+        ax.text(0.5, 0.5, 'No spending data', ha='center', va='center')
+        return fig
+    fig, ax = plt.subplots(figsize=(8, 4))
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    # --- END ---
+    ax.bar(cat_totals.index, cat_totals.values)
+    ax.set_xlabel('Category')
+    ax.set_ylabel('Total Spending ($)')
+    ax.set_title('Spending by Category')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    return fig
+
+
+
+# end chart generation functions
+
+# begin advanced chart functions 2608152021
+# ============================================
+# ADVANCED CHARTS - ADD THIS BLOCK
+# ============================================
+
+def create_monthly_chart(df):
+    """Create monthly spending trend chart."""
+    if df.empty:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('white')
+        ax.text(0.5, 0.5, 'No data available', ha='center', va='center')
+        return fig
+    
+    # Extract month from date
+    df['Month'] = pd.to_datetime(df['Date']).dt.strftime('%Y-%m')
+    
+    # Group by month
+    monthly = df.groupby('Month').agg({
+        'Amount': 'sum',
+        'Income': 'sum'
+    }).fillna(0)
+    
+    if monthly.empty:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('white')
+        ax.text(0.5, 0.5, 'No monthly data', ha='center', va='center')
+        return fig
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    # --- ADD WHITE BACKGROUND ---
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    # --- END ---
+    x = range(len(monthly.index))
+    width = 0.35
+    
+    ax.bar(x, monthly['Amount'], width, label='Spending', color='salmon')
+    ax.bar([i + width for i in x], monthly['Income'], width, label='Income', color='skyblue')
+    
+    ax.set_xlabel('Month')
+    ax.set_ylabel('Amount ($)')
+    ax.set_title('Monthly Income vs Spending')
+    ax.set_xticks([i + width/2 for i in x])
+    ax.set_xticklabels(monthly.index, rotation=45, ha='right')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
+
+def create_category_trend_chart(df):
+    """Show how category spending changes over time."""
+    if df.empty:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('white')
+        ax.text(0.5, 0.5, 'No data available', ha='center', va='center')
+        return fig
+    
+    # Filter out Income category
+    df_expenses = df[df['Category'] != 'Income'].copy()
+    if df_expenses.empty:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('white')
+        ax.text(0.5, 0.5, 'No expense data', ha='center', va='center')
+        return fig
+    
+    # Get top 5 categories
+    top_cats = df_expenses.groupby('Category')['Amount'].sum().nlargest(5).index.tolist()
+    df_top = df_expenses[df_expenses['Category'].isin(top_cats)]
+    
+    # Group by month and category
+    df_top['Month'] = pd.to_datetime(df_top['Date']).dt.strftime('%Y-%m')
+    pivot = df_top.pivot_table(index='Month', columns='Category', values='Amount', aggfunc='sum', fill_value=0)
+    
+    if pivot.empty:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('white')
+        ax.text(0.5, 0.5, 'Insufficient data', ha='center', va='center')
+        return fig
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    # --- ADD WHITE BACKGROUND ---
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    # --- END ---
+    pivot.plot(kind='bar', ax=ax, stacked=True)
+    
+    ax.set_xlabel('Month')
+    ax.set_ylabel('Spending ($)')
+    ax.set_title('Top 5 Categories - Monthly Trend')
+    ax.legend(title='Category', bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.grid(True, alpha=0.3)
+    plt.xticks(rotation=45, ha='right')
+    
+    plt.tight_layout()
+    return fig
+
+# end advanced chart functions 2608152021
+
+def generate_warnings(df, daily):
+    warnings = []
+    
+    total_income = df['Income'].sum()
+    total_spent = df['Amount'].sum()
+    if total_spent > total_income:
+        warnings.append("⚠️ Spending exceeds income. You're in the red.")
+    
+    daily_spent = daily['Amount']
+    if len(daily_spent) >= 2:
+        recent_avg = daily_spent.tail(3).mean()
+        previous_avg = daily_spent.head(3).mean()
+        if recent_avg > previous_avg * 1.3:
+            warnings.append(f"⚠️ Recent daily spending increased by {((recent_avg/previous_avg - 1)*100):.1f}% compared to earlier days.")
+    
+    cat_totals = df[df['Category'] != 'Income'].groupby('Category')['Amount'].sum()
+    total_spent = df['Amount'].sum()
+    for cat, amt in cat_totals.items():
+        pct = (amt / total_spent * 100) if total_spent > 0 else 0
+        if pct > 40:
+            warnings.append(f"⚠️ {cat} is {pct:.1f}% of spending. Consider reducing.")
+    
+    return warnings if warnings else ["✅ No warnings. You're on track."]
+
+def analyze_spending(file):
+    """Full analysis: summary, charts, warnings."""
+    df, daily = load_and_categorize(file)
+    
+    total_spent = df['Amount'].sum()
+    total_income = df['Income'].sum()
+    net = total_income - total_spent
+    
+    summary = f"📊 Spending Summary\n"
+    summary += "=" * 40 + "\n"
+    summary += f"Total Spent:  ${total_spent:,.2f}\n"
+    summary += f"Total Income: ${total_income:,.2f}\n"
+    summary += f"Net:          ${net:,.2f}\n"
+    
+    cat_totals = df[df['Category'] != 'Income'].groupby('Category')['Amount'].sum()
+    summary += "\n📂 Category Breakdown:\n"
+    for cat, amt in cat_totals.sort_values(ascending=False).items():
+        pct = (amt / total_spent * 100) if total_spent > 0 else 0
+        summary += f"  {cat}: ${amt:,.2f} ({pct:.1f}%)\n"
+      # --- CLEAN THE SUMMARY TEXT IMMEDIATELY ---
+    summary = clean_text(summary)
+    
+
+    
+    fig1 = create_line_chart(daily)
+    fig2 = create_pie_chart(df)
+    fig3 = create_bar_chart(df)
+    
+    warnings = generate_warnings(df, daily)
+    warnings_text = "\n".join(warnings) if warnings else "✅ No warnings."
+    
+    return summary, fig1, fig2, fig3, warnings_text
+
+#2608112226
+
+def analyze_spending_from_df(df):
+    """Analyze spending from a DataFrame."""
+    
+    # --- FIX: Handle both uppercase and lowercase column names ---
+    if 'item' in df.columns and 'Item' not in df.columns:
+        df = df.rename(columns={
+            'item': 'Item',
+            'price': 'Price',
+            'qty': 'Qty',
+            'amount': 'Amount',
+            'income': 'Income',
+            'category': 'Category'
+        })
+    
+    # Ensure date is datetime
+    if 'Date' not in df.columns:
+        df['Date'] = pd.to_datetime(df['date'])
+    
+    # --- FIX: Income should NOT be in Amount (for expenses) ---
+    # The 'Amount' column is for expenses. 'Income' is separate.
+    # If Amount is empty but Income has a value, set Amount to 0.
+    if 'Amount' not in df.columns:
+        df['Amount'] = 0
+    df['Amount'] = df['Amount'].fillna(0)
+    df['Income'] = df['Income'].fillna(0)
+    
+    # --- Categorization Rules ---
+    def categorize(item):
+        item_lower = str(item).lower()
+        if item_lower in ['bus', 'metro', 'taxi']:
+            return 'Traffic'
+        elif item_lower in ['breakfast', 'lunch', 'food']:
+            return 'Food'
+        elif item_lower in ['dividend', 'salary']:
+            return 'Income'
+        elif item_lower in ['insurance', 'rent', 'utilities']:
+            return 'Expenses'
+        else:
+            return 'Other'
+    
+    # Add Category column if it doesn't exist
+    if 'Category' not in df.columns:
+        df['Category'] = df['Item'].apply(categorize)
+    
+    # --- FIX: Daily summary should use Amount for expenses, Income for income ---
+    daily = df.groupby('Date').agg({
+        'Amount': 'sum',      # Total expenses
+        'Income': 'sum'       # Total income
+    }).fillna(0)
+    
+    daily['Net'] = daily['Income'] - daily['Amount']
+    daily['Cumulative'] = daily['Net'].cumsum()
+    
+    # --- Summary ---
+    total_spent = df['Amount'].sum()
+    total_income = df['Income'].sum()
+    net = total_income - total_spent
+    
+    summary = f"📊 Spending Summary\n"
+    summary += "=" * 40 + "\n"
+    summary += f"Total Spent:  ${total_spent:,.2f}\n"
+    summary += f"Total Income: ${total_income:,.2f}\n"
+    summary += f"Net:          ${net:,.2f}\n"
+    
+    # Category breakdown (excluding Income category)
+    cat_totals = df[df['Category'] != 'Income'].groupby('Category')['Amount'].sum()
+    summary += "\n📂 Category Breakdown:\n"
+    for cat, amt in cat_totals.sort_values(ascending=False).items():
+        pct = (amt / total_spent * 100) if total_spent > 0 else 0
+        summary += f"  {cat}: ${amt:,.2f} ({pct:.1f}%)\n"
+    
+    # Charts
+    fig1 = create_line_chart(daily)
+    fig2 = create_pie_chart(df)
+    fig3 = create_bar_chart(df)
+    
+    # --- ADD NEW CHARTS --- 2608152031
+    fig4 = create_monthly_chart(df)
+    fig5 = create_category_trend_chart(df)
+    
+    # Warnings
+    warnings = generate_warnings(df, daily)
+    warnings_text = "\n".join(warnings) if warnings else "✅ No warnings."
+    
+    # Clean text
+    summary = summary.encode('ascii', 'ignore').decode('ascii')
+    warnings_text = warnings_text.encode('ascii', 'ignore').decode('ascii')
+    
+    return summary, fig1, fig2, fig3, warnings_text,fig4,fig5
+
+# 2608111727
+# calculates income as an expense
+
+
+# pdf export function 2608111703 replaced 2608111726
+def analyze_and_export(file):
+    """Run analysis and generate PDF."""
+    if file is None:
+        return "No file uploaded.", None, None, None, "No warnings.", None,None,None
+    
+    try:
+        # Read the file
+        df = pd.read_excel(file.name)
+        
+        # --- ADD THIS LINE TO STORE EXCEL DATA FOR AI ---
+        # Store for AI insights
+        get_ai_insights_with_voice.last_excel_data = df
+        # --- END ADD ---
+        
+        # Run analysis on the DataFrame directly
+        summary, fig1, fig2, fig3, warnings_text,fig4,fig5= analyze_spending_from_df(df)
+        
+        # Clean the text for PDF
+        # summary_cleaned = clean_text(summary)
+        # warnings_cleaned = clean_text(warnings_text)
+
+        # Generate PDF
+        chart_figs = [fig1, fig2, fig3]
+        pdf_path = create_pdf_report(summary, warnings_text, chart_figs)
+        
+        return summary, fig1, fig2, fig3, warnings_text, pdf_path,fig4,fig5
+    except Exception as e:
+        return f"❌ Error: {e}", None, None, None, "Error", None,None,None
+# end pdf export function 2608111703
+# new 2608112147
+def get_sqlite_data_as_df():
+    """Get SQLite data as a DataFrame, formatted for analysis."""
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query("SELECT date, time, item, price, qty, amount, income, category FROM transactions", conn)
+    conn.close()
+    
+    if df.empty:
+        return None
+    
+    # --- STANDARDIZE COLUMN NAMES (lowercase -> Capitalized) ---
+    df = df.rename(columns={
+        'item': 'Item',
+        'price': 'Price',
+        'qty': 'Qty',
+        'amount': 'Amount',
+        'income': 'Income',
+        'category': 'Category'
+    })
+    
+    # Ensure date is datetime
+    df['Date'] = pd.to_datetime(df['date'])
+    
+    # Add missing columns (BankSavings is not in SQLite)
+    df['BankSavings'] = 0
+    
+    return df
+# 2608112147
+
+
+
+def analyze_from_sqlite():
+    """Analyze data from SQLite instead of Excel."""
+    df = get_sqlite_data_as_df()
+    if df is None or df.empty:
+        return "No data in database.", None, None, None, "No warnings.", None
+    
+    return analyze_spending_from_df(df)
+
+# end unify sqlite data src
+
+# step 3 update delete 2608112137
+def update_transaction(transaction_id, date, time, item, price, qty, amount, income, category):
+    """Update a transaction in the database."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""UPDATE transactions 
+                 SET date=?, time=?, item=?, price=?, qty=?, amount=?, income=?, category=?
+                 WHERE id=?""",
+              (date, time, item, price, qty, amount, income, category, transaction_id))
+    conn.commit()
+    conn.close()
+    return f"✅ Updated transaction #{transaction_id}"
+
+def delete_transaction(transaction_id):
+    """Delete a transaction from the database."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("DELETE FROM transactions WHERE id=?", (transaction_id,))
+    conn.commit()
+    conn.close()
+    return f"🗑️ Deleted transaction #{transaction_id}"
+
+def get_transaction_by_id(transaction_id):
+    """Get a single transaction by ID."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id, date, time, item, price, qty, amount, income, category FROM transactions WHERE id=?", (transaction_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def get_all_transactions():
+    """Get all transactions for display."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id, date, time, item, amount, category FROM transactions ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+# end step 3 update delete
+
+# step 4 navigate 2608112128
+
+# State variable for current transaction ID (stored in a global or session)
+current_id = None
+
+def get_first_id():
+    """Get the first transaction ID."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT MIN(id) FROM transactions")
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+def get_last_id():
+    """Get the last transaction ID."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT MAX(id) FROM transactions")
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+def get_next_id(current_id):
+    """Get the next transaction ID."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT MIN(id) FROM transactions WHERE id > ?", (current_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+def get_prev_id(current_id):
+    """Get the previous transaction ID."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT MAX(id) FROM transactions WHERE id < ?", (current_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+# end step 4 navigate
+
+# step 5 backup restore 2608112131
+import json
+import os
+
+def backup_database():
+    """Backup the database to a JSON file."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        df = pd.read_sql_query("SELECT date, time, item, price, qty, amount, income, category FROM transactions", conn)
+        conn.close()
+        
+        # Convert all values to Python native types
+        for col in df.columns:
+            df[col] = df[col].apply(lambda x: None if pd.isna(x) else x)
+        
+        backup_file = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        df.to_json(backup_file, orient='records', indent=2)
+        return backup_file
+    except Exception as e:
+        return f"❌ Backup failed: {e}"
+    
+
+
+
+
+
+
+
+# new 2608161420 dynamic
+def restore_database(backup_file):
+    """Restore the database from a JSON backup file (dynamic column handling)."""
+    if not backup_file:
+        return "❌ No file selected."
+    
+    try:
+        # Read the backup
+        df = pd.read_json(backup_file)
+        
+        if df.empty:
+            return "❌ Backup file is empty."
+        
+        # Get the columns that exist in the backup
+        backup_columns = df.columns.tolist()
+        print(f"Backup columns: {backup_columns}")
+        
+        # Get the columns that exist in the transactions table
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(transactions)")
+        table_columns = [col[1] for col in c.fetchall()]
+        print(f"Table columns: {table_columns}")
+        
+        # Find which columns we can insert (intersection of backup and table)
+        insert_columns = [col for col in backup_columns if col in table_columns]
+        
+        if not insert_columns:
+            conn.close()
+            return "❌ No matching columns found in backup."
+        
+        # Build the INSERT statement with only available columns
+        placeholders = ', '.join(['?' for _ in insert_columns])
+        columns_str = ', '.join(insert_columns)
+        
+        # Clear existing data
+        c.execute("DELETE FROM transactions")
+        
+        # Insert restored data
+        count = 0
+        for _, row in df.iterrows():
+            # Get values for the columns we're inserting
+            values = []
+            for col in insert_columns:
+                val = row.get(col)
+                # Handle NaN/None
+                if pd.isna(val) or val is None:
+                    # Default values based on column type
+                    if col in ['id']:
+                        values.append(None)
+                    elif col in ['date', 'time', 'item', 'category']:
+                        values.append('')
+                    elif col in ['price', 'qty', 'amount', 'income']:
+                        values.append(0)
+                    else:
+                        values.append(None)
+                else:
+                    values.append(val)
+            
+            c.execute(f"INSERT INTO transactions ({columns_str}) VALUES ({placeholders})", values)
+            count += 1
+        
+        conn.commit()
+        conn.close()
+        return f"✅ Restored {count} records from {backup_file}"
+    except Exception as e:
+        return f"❌ Restore failed: {e}"
+    
+# new 2608161354
+
+  
+
+
+# password demo 2608121929
+# --- Password Check ---
+def check_password_ui(password):
+    if check_password(password):
+        return "✅ Access granted.", gr.update(visible=True), gr.update(visible=False)
+    else:
+        return "❌ Wrong password.", gr.update(visible=False), gr.update(visible=True)
+
+# end password demo 2608121929
+# ai insight related 2608151741
+# ============================================
+# AI INSIGHTS WITH VOICE - ADD THIS BLOCK
+# ============================================
+
+import pyttsx3
+import json
+
+# Voice settings file
+VOICE_SETTINGS_FILE = "voice_settings.json"
+
+def get_voice_settings():
+    """Get voice settings from file."""
+    try:
+        with open(VOICE_SETTINGS_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {"voice_enabled": True}
+
+def save_voice_settings(settings):
+    """Save voice settings to file."""
+    with open(VOICE_SETTINGS_FILE, 'w') as f:
+        json.dump(settings, f)
+
+def speak_text(text):
+    """Convert text to speech using Zira voice."""
+    settings = get_voice_settings()
+    if not settings.get("voice_enabled", True):
+        return
+    
+    try:
+        engine = pyttsx3.init()
+        
+        # Force Zira voice (Windows 10/11)
+        voices = engine.getProperty('voices')
+        
+        # Try Zira first, then David, then any English voice
+        for voice in voices:
+            voice_id = voice.id.lower()
+            voice_name = voice.name.lower()
+            
+            if 'zira' in voice_id or 'zira' in voice_name:
+                engine.setProperty('voice', voice.id)
+                break
+            elif 'david' in voice_id or 'david' in voice_name:
+                engine.setProperty('voice', voice.id)
+                break
+            elif 'english' in voice_name or 'us' in voice_name:
+                engine.setProperty('voice', voice.id)
+                break
+        
+        # Set speech properties
+        engine.setProperty('rate', 150)
+        engine.setProperty('volume', 1.0)
+        
+        # Clean text (remove emojis)
+        import re
+        clean_text = re.sub(r'[^\w\s\d\.,!?%$]', '', text)
+        
+        engine.say(clean_text)
+        engine.runAndWait()
+        
+    except Exception as e:
+        print(f"Voice error: {e}")
+
+
+def speak_text_old1(text): #konglish 260151801
+    """Convert text to speech if voice is enabled."""
+    settings = get_voice_settings()
+    if not settings.get("voice_enabled", True):
+        return
+    
+    try:
+        engine = pyttsx3.init()
+        engine.say(text)
+        engine.runAndWait()
+    except Exception as e:
+        print(f"Voice error: {e}")
+
+def generate_ai_insights(df):
+    """Generate AI-powered insights from spending data."""
+    if df is None or df.empty:
+        return "No data available for analysis."
+    
+    insights = []
+    insights.append("🤖 AI SPENDING INSIGHTS")
+    insights.append("=" * 40)
+    
+    # Basic statistics
+    total_spent = df['Amount'].sum()
+    total_income = df['Income'].sum()
+    transaction_count = len(df)
+    
+    insights.append(f"\n📊 Overview:")
+    insights.append(f"• Total Transactions: {transaction_count}")
+    insights.append(f"• Total Spent: ${total_spent:,.2f}")
+    insights.append(f"• Total Income: ${total_income:,.2f}")
+    
+    if total_income > 0:
+        savings_rate = ((total_income - total_spent) / total_income * 100)
+        if savings_rate > 20:
+            insights.append(f"• ✅ Savings Rate: {savings_rate:.1f}% (Excellent!)")
+        elif savings_rate > 10:
+            insights.append(f"• 👍 Savings Rate: {savings_rate:.1f}% (Good)")
+        elif savings_rate > 0:
+            insights.append(f"• 📊 Savings Rate: {savings_rate:.1f}% (Could improve)")
+        else:
+            insights.append(f"• ⚠️ Savings Rate: {savings_rate:.1f}% (You're overspending)")
+    
+    # Category analysis
+    if 'Category' in df.columns:
+        cat_totals = df[df['Category'] != 'Income'].groupby('Category')['Amount'].sum()
+        if not cat_totals.empty:
+            insights.append(f"\n📂 Spending by Category:")
+            for cat, amt in cat_totals.sort_values(ascending=False).head(5).items():
+                pct = (amt / total_spent * 100) if total_spent > 0 else 0
+                insights.append(f"• {cat}: ${amt:,.2f} ({pct:.1f}%)")
+            
+            # Recommendations
+            top_cat = cat_totals.idxmax()
+            top_pct = (cat_totals.max() / total_spent * 100) if total_spent > 0 else 0
+            
+            if top_pct > 40:
+                insights.append(f"\n💡 Recommendation:")
+                if top_cat.lower() in ['food', 'restaurant']:
+                    insights.append(f"• Consider meal planning to reduce {top_cat} spending")
+                elif top_cat.lower() in ['entertainment']:
+                    insights.append(f"• Review subscriptions and look for cheaper alternatives")
+                elif top_cat.lower() in ['traffic', 'transport']:
+                    insights.append(f"• Consider public transport or carpooling")
+                else:
+                    insights.append(f"• {top_cat} is {top_pct:.1f}% of spending. Review this category")
+    
+    # Monthly trend (if we have enough data)
+    if 'Date' in df.columns:
+        df['Month'] = pd.to_datetime(df['Date']).dt.month
+        if df['Month'].nunique() >= 2:
+            monthly = df.groupby('Month')['Amount'].sum()
+            if len(monthly) >= 2:
+                trend = monthly.pct_change().iloc[-1] if len(monthly) > 1 else 0
+                if trend > 0.2:
+                    insights.append(f"\n📈 Monthly spending increased by {trend*100:.1f}%")
+                    insights.append("• Review recent purchases for patterns")
+                elif trend < -0.1:
+                    insights.append(f"\n📉 Monthly spending decreased by {abs(trend)*100:.1f}%")
+                    insights.append("• Great job! Keep up the good habits")
+    
+    # Convert to readable text
+    result = "\n".join(insights)
+    return result
+
+# new multispeak
+
+def get_ai_insights_with_voice(data_source_choice):
+    """Get AI insights with voice based on selected data source."""
+    df = None
+    source_label = ""
+    insights = None  # Initialize insights at the start
+    
+    if data_source_choice == "SQLite Database":
+        df = get_sqlite_data_as_df()
+        source_label = "SQLite Database"
+        
+        if df is None or df.empty:
+            return f"❌ No data available in {source_label}."
+        
+        insights = generate_ai_insights(df)
+        speak_text(insights)
+        
+        # Add source info at the top
+        source_info = f"📊 Data Source: {source_label}\n"
+        source_info += "=" * 40 + "\n\n"
+        return source_info + insights
+        
+    elif data_source_choice == "Uploaded Excel":
+        try:
+            if hasattr(get_ai_insights_with_voice, 'last_excel_data'):
+                df = get_ai_insights_with_voice.last_excel_data
+                source_label = "Excel File"
+            else:
+                return "❌ No Excel data uploaded yet. Please upload an Excel file first."
+        except:
+            return "❌ No Excel data uploaded yet. Please upload an Excel file first."
+        
+        if df is None or df.empty:
+            return f"❌ No data available in {source_label}."
+        
+        insights = generate_ai_insights(df)
+        speak_text(insights)
+        
+        source_info = f"📊 Data Source: {source_label}\n"
+        source_info += "=" * 40 + "\n\n"
+        return source_info + insights
+        
+    else:  # "All Combined"
+        # Get both data sources
+        df_sqlite = get_sqlite_data_as_df()
+        
+        # Get Excel data if available
+        df_excel = None
+        excel_available = False
+        try:
+            if hasattr(get_ai_insights_with_voice, 'last_excel_data'):
+                df_excel = get_ai_insights_with_voice.last_excel_data
+                if df_excel is not None and not df_excel.empty:
+                    excel_available = True
+        except:
+            pass
+        
+        # Check if sqlite has data
+        sqlite_available = df_sqlite is not None and not df_sqlite.empty
+        
+        if not sqlite_available and not excel_available:
+            return "❌ No data available in any source. Please add transactions or upload an Excel file."
+        
+        # Build combined insights with separate sections
+        combined_insights = []
+        combined_insights.append("📊 COMBINED DATA INSIGHTS")
+        combined_insights.append("=" * 50)
+        combined_insights.append("")
+        
+        # Section 1: Excel Data
+        if excel_available:
+            combined_insights.append("📁 EXCEL DATA SUMMARY")
+            combined_insights.append("-" * 30)
+            excel_insights = generate_ai_insights(df_excel)
+            excel_lines = excel_insights.split('\n')
+            if len(excel_lines) > 2:
+                combined_insights.extend(excel_lines[2:])
+            else:
+                combined_insights.extend(excel_lines)
+            combined_insights.append("")
+        
+        # Section 2: SQLite Data
+        if sqlite_available:
+            combined_insights.append("📁 SQLITE DATA SUMMARY")
+            combined_insights.append("-" * 30)
+            sqlite_insights = generate_ai_insights(df_sqlite)
+            sqlite_lines = sqlite_insights.split('\n')
+            if len(sqlite_lines) > 2:
+                combined_insights.extend(sqlite_lines[2:])
+            else:
+                combined_insights.extend(sqlite_lines)
+            combined_insights.append("")
+        
+        # Section 3: Combined Overall
+        combined_insights.append("📁 OVERALL COMBINED")
+        combined_insights.append("-" * 30)
+        
+        # Combine both dataframes
+        df_list = []
+        if sqlite_available:
+            df_list.append(df_sqlite)
+        if excel_available:
+            df_list.append(df_excel)
+        
+        df_combined = pd.concat(df_list, ignore_index=True)
+        overall_insights = generate_ai_insights(df_combined)
+        overall_lines = overall_insights.split('\n')
+        if len(overall_lines) > 2:
+            combined_insights.extend(overall_lines[2:])
+        else:
+            combined_insights.extend(overall_lines)
+        
+        insights = "\n".join(combined_insights)
+        
+        # Speak only the overall summary
+        overall_text = "\n".join(overall_lines)
+        speak_text(overall_text)
+        
+        return insights
+
+
+
+
+# end new multispeak
+# new 2608151832 replaced 2608151840 for multi output
+
+       
+
+
+def toggle_voice(enable):
+    """Toggle voice output on/off."""
+    settings = get_voice_settings()
+    settings["voice_enabled"] = enable
+    save_voice_settings(settings)
+    status = "🔊 Voice ON" if enable else "🔇 Voice OFF"
+    return status, enable
+# end ai insight
+
+
+# ============================================
+# GRADIO UI
+# ============================================
+#simplified version for test 2608121959
+# ============================================
+# GRADIO UI
+# ============================================
+
+# --- Password functions ---
+def check_password_ui(password):
+    if check_password(password):
+        return "✅ Access granted.", gr.update(visible=True), gr.update(visible=False)
+    else:
+        return "❌ Wrong password.", gr.update(visible=False), gr.update(visible=True)
+
+def set_new_password(pwd1, pwd2):
+    if pwd1 == pwd2 and len(pwd1) >= 4:
+        set_password(pwd1)
+        return "✅ Password set successfully!"
+    else:
+        return "❌ Passwords don't match or are too short."
+
+def show_set_password():
+    return gr.update(visible=True), gr.update(visible=True)
+
+# --- Gradio UI ---
+# ============================================
+# GRADIO UI - COMPLETE WORKING VERSION
+# ============================================
+
+# --- Password functions ---
+def check_password_ui(password):
+    if check_password(password):
+        return "✅ Access granted.", gr.update(visible=True), gr.update(visible=False)
+    else:
+        return "❌ Wrong password.", gr.update(visible=False), gr.update(visible=True)
+
+def set_new_password(pwd1, pwd2):
+    if pwd1 == pwd2 and len(pwd1) >= 4:
+        set_password(pwd1)
+        return "✅ Password set successfully!"
+    else:
+        return "❌ Passwords don't match or are too short."
+
+# --- Gradio UI ---
+with gr.Blocks(title="Dozen133 Mini") as demo:
+    
+    # ============================================
+    # LOGIN SCREEN
+    # ============================================
+    with gr.Column(visible=True) as login_screen:
+        gr.Markdown("## 🔒 Enter Password")
+    
+        # Check if password exists
+        if is_password_set():
+            gr.Markdown("Please enter your password to access the app.")
+        else:
+            gr.Markdown("No password set. Please set a password first.")
+    
+        pwd_input = gr.Textbox(
+            label="Password", 
+            type="password", 
+            placeholder="Enter your password",
+            value=""
+        )
+        login_btn = gr.Button("Login", variant="primary")
+        login_status = gr.Textbox(label="Status", interactive=False, visible=True)
+    
+        # Set password section (always visible for first-time setup)
+        gr.Markdown("---")
+        gr.Markdown("### Set a New Password")
+        new_pwd_input = gr.Textbox(
+            label="New Password", 
+            type="password", 
+            placeholder="Enter new password (min 4 characters)"
+        )
+        confirm_pwd_input = gr.Textbox(
+            label="Confirm Password", 
+            type="password", 
+            placeholder="Confirm password"
+        )
+        set_pwd_btn = gr.Button("Set Password", variant="secondary")
+        set_status = gr.Textbox(label="Status", interactive=False, visible=True)
+    
+        def set_new_password_local(pwd1, pwd2):
+            if not pwd1 or not pwd2:
+                return "❌ Please enter a password."
+            if pwd1 != pwd2:
+                return "❌ Passwords do not match."
+            if len(pwd1) < 4:
+                return "❌ Password must be at least 4 characters."
+        
+            # Save the password
+            with open(PASSWORD_FILE, "w") as f:
+                f.write(hash_password(pwd1))
+            return "✅ Password set successfully! You can now log in."
+        
+        set_pwd_btn.click(
+            set_new_password_local,
+            inputs=[new_pwd_input, confirm_pwd_input],
+            outputs=[set_status]
+        )
+    
+    # ============================================
+    # MAIN APP (hidden by default)
+    # ============================================
+    with gr.Column(visible=False) as main_app:
+        gr.Markdown("# 📊 Dozen133 Mini — Personal Finance Tracker")
+        
+        with gr.Tabs():
+            
+            # ============================================
+            # BUDGET TAB (TOP LEVEL)
+            # ============================================
+            with gr.TabItem("💰 Budget"):
+                gr.Markdown("## Personal Budget Tracker")
+                
+                with gr.Tabs():
+                    
+                    # --- Budget Sub-Tab: Upload & Analyze ---
+                    with gr.TabItem("📤 Upload & Analyze"):
+                        gr.Markdown("Upload your Excel file with columns: Date, Time, Item, Price, Qty, Amount, Income")
+                        
+                        file_input = gr.File(label="Upload Excel (.xlsx)", file_types=[".xlsx"])
+                        
+                        with gr.Row():
+                            analyze_btn = gr.Button("📊 Analyze", variant="primary")
+                            export_btn = gr.Button("📄 Export PDF", variant="secondary")
+                        
+                        summary_output = gr.Textbox(label="📋 Summary", lines=20, interactive=False)
+                        
+                        with gr.Row():
+                            chart1 = gr.Plot(label="Line Chart: Net Balance Over Time")
+                            chart2 = gr.Plot(label="Pie Chart: Spending by Category")
+                        
+                        chart3 = gr.Plot(label="Bar Chart: Spending by Category")
+                        
+                        # --- ADD NEW CHARTS ---
+                        with gr.Row():
+                            chart4 = gr.Plot(label="Monthly Income vs Spending")
+                            chart5 = gr.Plot(label="Top 5 Categories - Monthly Trend")
+                    # --- END ADD ---
+                        warnings_output = gr.Textbox(label="⚠️ Warnings", lines=10, interactive=False)
+                        pdf_output = gr.File(label="📄 Download PDF Report")
+                        
+                        # Click events - properly indented inside the with gr.TabItem block
+                        analyze_btn.click(
+                            analyze_and_export,
+                            inputs=[file_input],
+                            outputs=[summary_output, chart1, chart2, chart3, warnings_output, pdf_output,chart4,chart5]
+                        )
+                        
+                        export_btn.click(
+                            analyze_and_export,
+                            inputs=[file_input],
+                            outputs=[summary_output, chart1, chart2, chart3, warnings_output, pdf_output,chart4,chart5]
+                        )
+                    
+                    # --- Budget Sub-Tab: Enter Data ---
+                    with gr.TabItem("📝 Enter Data"):
+                        gr.Markdown("## Add a Transaction Manually")
+                        
+                        with gr.Row():
+                            date_input = gr.Textbox(label="Date (YYYY-MM-DD)", value=datetime.now().strftime("%Y-%m-%d"))
+                            time_input = gr.Textbox(label="Time (HH:MM)", value=datetime.now().strftime("%H:%M"))
+                        
+                        with gr.Row():
+                            item_input = gr.Textbox(label="Item")
+                            category_input = gr.Dropdown(
+                                label="Category",
+                                choices=["Traffic", "Food", "Income", "Expenses", "Other"],
+                                value="Other"
+                            )
+                        
+                        
+                        # account selection
+                        # --- ADD ACCOUNT DROPDOWN ---
+                        # Get accounts for dropdown
+                        accounts_df = get_accounts()
+                        account_choices = ["None"] + accounts_df['name'].tolist() if not accounts_df.empty else ["None"]
+                        account_input = gr.Dropdown(
+                            label="Account",
+                            choices=account_choices,
+                            value="None"
+                        )
+                        # --- END ADD ACCOUNT DROPDOWN
+                        
+                        # end account selection 2608150842
+                        with gr.Row():
+                            price_input = gr.Number(label="Price", value=0.00)
+                            qty_input = gr.Number(label="Quantity", value=1)
+                            amount_display = gr.Textbox(label="Amount (calculated)", value="$0.00", interactive=False)
+                            income_input = gr.Number(label="Income (if applicable)", value=0.00)
+                        
+                        submit_btn = gr.Button("💾 Save Transaction", variant="primary")
+                        status_output = gr.Textbox(label="Status", lines=2, interactive=False)
+                        
+                        def calculate_amount(price, qty):
+                            if price and qty:
+                                return f"${price * qty:.2f}"
+                            return "$0.00"
+                        
+                        price_input.change(calculate_amount, inputs=[price_input, qty_input], outputs=[amount_display])
+                        qty_input.change(calculate_amount, inputs=[price_input, qty_input], outputs=[amount_display])
+                        # new save_transaction 2608150904
+                        
+                        def save_transaction(date, time, item, price, qty, amount_display, income, category, account_name):
+                            if not item:
+                                return "❌ Please enter an item."
+                            import re
+                            amount_match = re.search(r"[\d.]+", amount_display)
+                            amount = float(amount_match.group()) if amount_match else 0.0
+                            
+                            # Use the original add_transaction or the new one with account
+                            if account_name and account_name != "None":
+                                result = add_transaction_with_account(date, time, item, price or 0, qty or 1, amount, income or 0, category, account_name)
+                            else:
+                                result = add_transaction(date, time, item, price or 0, qty or 1, amount, income or 0, category)
+                            return result
+                        
+                        # end new save_transaction
+                        
+                        
+                        def save_transaction_old1(date, time, item, price, qty, amount_display, income, category):
+                            if not item:
+                                return "❌ Please enter an item."
+                            import re
+                            amount_match = re.search(r"[\d.]+", amount_display)
+                            amount = float(amount_match.group()) if amount_match else 0.0
+                            
+                             # Use the original add_transaction or the new one with account
+                            if account and account != "None":
+                                result = add_transaction_with_account(date, time, item, price or 0, qty or 1, amount, income or 0, category, account)
+                            else:
+                                result = add_transaction(date, time, item, price or 0, qty or 1, amount, income or 0, category)
+                            
+                            
+                            # result = add_transaction(date, time, item, price or 0, qty or 1, amount, income or 0, category)
+                            return result
+                        
+                        
+                        
+                        submit_btn.click(
+                            save_transaction,
+                            inputs=[date_input, time_input, item_input, price_input, qty_input, amount_display, income_input, category_input, account_input],
+                            outputs=[status_output]
+                        )
+                        
+                        gr.Markdown("## Recent Transactions")
+                        recent_btn = gr.Button("🔄 Refresh")
+                        recent_output = gr.Textbox(label="Recent Transactions", lines=10, interactive=False)
+                        
+                        def show_recent():
+                            rows = get_recent_transactions(10)
+                            if not rows:
+                                return "No transactions yet."
+                            result = ""
+                            for row in rows:
+                                result += f"{row[0]} {row[1]} - {row[2]}: ${row[3]:.2f} ({row[4]})\n"
+                            return result
+                        
+                        recent_btn.click(show_recent, outputs=[recent_output])
+                        
+                        # --- SQLite Analysis ---
+                        gr.Markdown("## SQLite Analysis")
+                        with gr.Row():
+                            analyze_sqlite_btn = gr.Button("📊 Analyze SQLite Data", variant="primary")
+                            export_sqlite_btn = gr.Button("📄 Export PDF from SQLite", variant="secondary")
+                        
+                        sqlite_summary = gr.Textbox(label="📋 Summary from SQLite", lines=20, interactive=False)
+                        
+                        with gr.Row():
+                            sqlite_chart1 = gr.Plot(label="Line Chart: Net Balance Over Time")
+                            sqlite_chart2 = gr.Plot(label="Pie Chart: Spending by Category")
+                        
+                        sqlite_chart3 = gr.Plot(label="Bar Chart: Spending by Category")
+                        # --- ADD NEW SQLITE CHARTS ---
+                        with gr.Row():
+                            sqlite_chart4 = gr.Plot(label="Monthly Income vs Spending")
+                            sqlite_chart5 = gr.Plot(label="Top 5 Categories - Monthly Trend")
+                        # --- END ADD ---
+                        sqlite_warnings = gr.Textbox(label="⚠️ Warnings", lines=10, interactive=False)
+                        sqlite_pdf = gr.File(label="📄 Download PDF Report")
+                        
+                        def analyze_sqlite_and_export():
+                            """Analyze SQLite data and export PDF."""
+                            try:
+                                df = get_sqlite_data_as_df()
+                                if df is None or df.empty:
+                                    return "No data in database.", None, None, None, "No warnings.", None,None,None
+                            
+                                summary, fig1, fig2, fig3, warnings_text,fig4,fig5 = analyze_spending_from_df(df)
+                                chart_figs = [fig1, fig2, fig3]
+                                pdf_path = create_pdf_report(summary, warnings_text, chart_figs)
+                                return summary, fig1, fig2, fig3, warnings_text, pdf_path,fig4,fig5
+                            except Exception as e:
+                                return f"Error: {str(e)}", None, None, None, "Error", None, None, None
+                        analyze_sqlite_btn.click(
+                            analyze_sqlite_and_export,
+                            inputs=[],
+                            outputs=[sqlite_summary, sqlite_chart1, sqlite_chart2, sqlite_chart3, sqlite_warnings, sqlite_pdf,sqlite_chart4,sqlite_chart5]
+                        )
+                        
+                        export_sqlite_btn.click(
+                            analyze_sqlite_and_export,
+                            inputs=[],
+                            outputs=[sqlite_summary, sqlite_chart1, sqlite_chart2, sqlite_chart3, sqlite_warnings, sqlite_pdf,sqlite_chart4,sqlite_chart5]
+                        )
+                    # end enter data tab
+                                    # --- Budget Sub-Tab: Accounts ---
+                with gr.TabItem("🏦 Accounts"):
+                    gr.Markdown("## Manage Bank Accounts & Cards")
+                    gr.Markdown("Register your bank accounts, credit cards, and payment methods.")
+                    
+                    with gr.Row():
+                        acc_name = gr.Textbox(label="Account Name", placeholder="e.g., Chase Checking")
+                        acc_type = gr.Dropdown(
+                            label="Account Type",
+                            choices=["Checking", "Savings", "Credit Card", "PayPal", "Stripe", "Investment"],
+                            value="Checking"
+                        )
+                        acc_balance = gr.Number(label="Initial Balance", value=0.00)
+                        acc_currency = gr.Dropdown(
+                            label="Currency",
+                            choices=["USD", "EUR", "GBP", "JPY"],
+                            value="USD"
+                        )
+                    
+                    add_acc_btn = gr.Button("➕ Add Account", variant="primary")
+                    acc_status = gr.Textbox(label="Status", lines=2, interactive=False)
+                    
+                    add_acc_btn.click(
+                        add_account,
+                        inputs=[acc_name, acc_type, acc_balance, acc_currency],
+                        outputs=[acc_status]
+                    )
+                    
+                    gr.Markdown("---")
+                    gr.Markdown("## Existing Accounts")
+                    
+                    refresh_acc_btn = gr.Button("🔄 Refresh Accounts", variant="secondary")
+                    acc_list = gr.Dataframe(
+                        label="Accounts",
+                        headers=["ID", "Name", "Type", "Balance", "Currency"],
+                        interactive=False
+                    )
+                    
+                    def refresh_accounts():
+                        df = get_accounts()
+                        if df.empty:
+                            return pd.DataFrame(columns=["ID", "Name", "Type", "Balance", "Currency"])
+                        return df
+                    
+                    refresh_acc_btn.click(refresh_accounts, outputs=[acc_list])
+                    
+                    # Load accounts initially
+                    acc_list.value = get_accounts()
+                    
+                    gr.Markdown("---")
+                    gr.Markdown("## Delete Account")
+                    with gr.Row():
+                        del_acc_name = gr.Textbox(label="Account Name to Delete", placeholder="Enter account name")
+                        del_acc_btn = gr.Button("🗑️ Delete Account", variant="secondary")
+                        del_acc_status = gr.Textbox(label="Status", lines=2, interactive=False)
+                    
+                    del_acc_btn.click(
+                        delete_account,
+                        inputs=[del_acc_name],
+                        outputs=[del_acc_status]
+                    )
+                
+                # ============================================
+                # BUDGET SUB-TAB: RECEIPTS - ADD THIS
+                # ============================================
+                
+                # --- Budget Sub-Tab: Receipts ---
+                                # --- Budget Sub-Tab: Receipts ---
+                            
+                                # --- Budget Sub-Tab: Receipts ---
+                with gr.TabItem("📎 Receipts"):
+                    gr.Markdown("## 📎 Receipt Manager")
+                    
+                    # ============================================
+                    # SECTION 1: ALL RECEIPTS
+                    # ============================================
+                    with gr.Group():
+                        gr.Markdown("### 📋 All Receipts")
+                        
+                        with gr.Row():
+                            refresh_all_btn = gr.Button("🔄 Refresh Receipts", variant="secondary")
+                        
+                        receipts_list = gr.Textbox(
+                            label="",
+                            lines=12,
+                            interactive=False
+                        )
+                    
+                    # ============================================
+                    # SECTION 2: UPLOAD RECEIPT
+                    # ============================================
+                    with gr.Group():
+                        gr.Markdown("### 📤 Upload New Receipt")
+                        
+                        def get_transaction_list():
+                            conn = sqlite3.connect(DB_FILE)
+                            c = conn.cursor()
+                            c.execute("SELECT id, date, item, amount FROM transactions ORDER BY id DESC LIMIT 50")
+                            rows = c.fetchall()
+                            conn.close()
+                            return rows
+                        
+                        def refresh_transaction_list():
+                            rows = get_transaction_list()
+                            if not rows:
+                                return ["No transactions available"]
+                            return [f"#{row[0]} - {row[1]} - {row[2]} (${row[3]:.2f})" for row in rows]
+                        
+                        transaction_choices = refresh_transaction_list()
+                        
+                        with gr.Row():
+                            txn_dropdown = gr.Dropdown(
+                                label="Select Transaction",
+                                choices=transaction_choices,
+                                value=transaction_choices[0] if transaction_choices else None,
+                                interactive=True
+                            )
+                            refresh_txn_btn = gr.Button("🔄 Refresh", variant="secondary", size="sm")
+                        
+                        refresh_txn_btn.click(
+                            lambda: gr.update(choices=refresh_transaction_list()),
+                            outputs=[txn_dropdown]
+                        )
+                        
+                        receipt_file = gr.File(
+                            label="Choose Receipt (Image or PDF)",
+                            file_types=[".png", ".jpg", ".jpeg", ".pdf"],
+                            type="filepath"
+                        )
+                        
+                        with gr.Row():
+                            upload_btn = gr.Button("📤 Upload Receipt", variant="primary")
+                            upload_status = gr.Textbox(label="", lines=2, interactive=False)
+                    
+                    # ============================================
+                    # SECTION 3: VIEW / DELETE RECEIPT
+                    # ============================================
+                    
+                                        # ============================================
+                    # SECTION 3: VIEW / DELETE RECEIPT
+                    # ============================================
+                    with gr.Group():
+                        gr.Markdown("### 👁️ View or Delete Receipt")
+                        
+                        with gr.Row():
+                            view_txn_dropdown = gr.Dropdown(
+                                label="Select Transaction",
+                                choices=transaction_choices,
+                                value=transaction_choices[0] if transaction_choices else None,
+                                interactive=True
+                            )
+                            refresh_view_btn = gr.Button("🔄 Refresh", variant="secondary", size="sm")
+                        
+                        refresh_view_btn.click(
+                            lambda: gr.update(choices=refresh_transaction_list()),
+                            outputs=[view_txn_dropdown]
+                        )
+                        
+                        # Use a single file component
+                        receipt_display = gr.File(
+                            label="Receipt File",
+                            interactive=False
+                        )
+                        receipt_info = gr.Textbox(
+                            label="Receipt Details",
+                            lines=3,
+                            interactive=False
+                        )
+                        
+                        with gr.Row():
+                            view_btn = gr.Button("🔍 Show Receipt", variant="secondary")
+                            delete_btn = gr.Button("🗑️ Delete Receipt", variant="stop")
+                        
+                        delete_status = gr.Textbox(label="", lines=1, interactive=False)
+                    
+                    # end section 3
+                    # ============================================
+                    # FUNCTIONS
+                    # ============================================
+                    # begin replace 2608151610
+                    # begin replace 
+                    # ============================================
+                    # FUNCTIONS - Define ALL functions first
+                    # ============================================
+                    
+                    def show_all_receipts():
+                        """Show all receipts with transaction details."""
+                        conn = sqlite3.connect(DB_FILE)
+                        c = conn.cursor()
+                        c.execute("""
+                            SELECT t.id, t.date, t.item, t.amount, r.filename, r.upload_date
+                            FROM receipts r
+                            JOIN transactions t ON r.transaction_id = t.id
+                            ORDER BY r.id DESC
+                        """)
+                        rows = c.fetchall()
+                        conn.close()
+                        
+                        if not rows:
+                            return "📎 No receipts uploaded yet."
+                        
+                        result = "📎 YOUR RECEIPTS\n"
+                        result += "=" * 50 + "\n\n"
+                        for idx, row in enumerate(rows, 1):
+                            result += f"{idx}. #{row[0]} | {row[1]}\n"
+                            result += f"   Item: {row[2]}\n"
+                            result += f"   Amount: ${row[3]:.2f}\n"
+                            result += f"   📎 {row[4]}\n"
+                            result += f"   📅 {row[5]}\n"
+                            result += "-" * 40 + "\n"
+                        return result
+                    
+                    def upload_receipt(selected_transaction, file_path):
+                        """Upload receipt for selected transaction and clear file input."""
+                        if file_path is None or file_path == "":
+                            return "❌ Please select a file to upload.", gr.update(value=None)
+                        
+                        if not selected_transaction:
+                            return "❌ Please select a transaction.", gr.update(value=None)
+                        
+                        import re
+                        match = re.search(r'#(\d+)', selected_transaction)
+                        if not match:
+                            return "❌ Invalid transaction selection.", gr.update(value=None)
+                        transaction_id = int(match.group(1))
+                        
+                        try:
+                            # Get file extension
+                            ext = os.path.splitext(file_path)[1] if '.' in file_path else '.jpg'
+                            
+                            # Create unique filename
+                            filename = f"receipt_{transaction_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+                            filepath = os.path.join("receipts", filename)
+                            
+                            # Copy the file
+                            import shutil
+                            shutil.copy2(file_path, filepath)
+                            
+                            # Update database
+                            conn = sqlite3.connect(DB_FILE)
+                            c = conn.cursor()
+                            c.execute("UPDATE transactions SET receipt_path=? WHERE id=?", (filepath, transaction_id))
+                            c.execute("""INSERT INTO receipts (transaction_id, filename, filepath, upload_date)
+                                         VALUES (?, ?, ?, ?)""",
+                                      (transaction_id, filename, filepath, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                            conn.commit()
+                            conn.close()
+                            
+                            # Clear the file input after successful upload
+                            return f"✅ Receipt uploaded!\n📎 {filename}", gr.update(value=None)
+                        except Exception as e:
+                            return f"❌ Error: {e}", gr.update(value=None)
+                    
+                    def view_receipt(selected_transaction):
+                        """View receipt for selected transaction - returns 2 values."""
+                        if not selected_transaction:
+                            return None, "❌ Please select a transaction."
+                        
+                        import re
+                        match = re.search(r'#(\d+)', selected_transaction)
+                        if not match:
+                            return None, "❌ Could not extract transaction ID."
+                        transaction_id = int(match.group(1))
+                        
+                        conn = sqlite3.connect(DB_FILE)
+                        c = conn.cursor()
+                        c.execute("SELECT filepath, filename, upload_date FROM receipts WHERE transaction_id=? ORDER BY id DESC LIMIT 1", (transaction_id,))
+                        row = c.fetchone()
+                        conn.close()
+                        
+                        if row:
+                            filepath, filename, upload_date = row
+                            if os.path.exists(filepath):
+                                return filepath, f"✅ Receipt found!\n📎 {filename}\n📅 Uploaded: {upload_date}"
+                            else:
+                                return None, f"⚠️ File missing: {filename}"
+                        else:
+                            return None, f"ℹ️ No receipt for transaction #{transaction_id}"
+                    
+                    def delete_receipt(selected_transaction):
+                        """Delete receipt for selected transaction."""
+                        if not selected_transaction:
+                            return "❌ Please select a transaction."
+                        
+                        import re
+                        match = re.search(r'#(\d+)', selected_transaction)
+                        if not match:
+                            return "❌ Could not extract transaction ID."
+                        transaction_id = int(match.group(1))
+                        
+                        conn = sqlite3.connect(DB_FILE)
+                        c = conn.cursor()
+                        c.execute("SELECT id, filepath FROM receipts WHERE transaction_id=? ORDER BY id DESC LIMIT 1", (transaction_id,))
+                        row = c.fetchone()
+                        
+                        if row:
+                            receipt_id, filepath = row
+                            if os.path.exists(filepath):
+                                os.remove(filepath)
+                            c.execute("DELETE FROM receipts WHERE id=?", (receipt_id,))
+                            c.execute("UPDATE transactions SET receipt_path=NULL WHERE id=?", (transaction_id,))
+                            conn.commit()
+                            conn.close()
+                            return "🗑️ Receipt deleted successfully!"
+                        else:
+                            conn.close()
+                            return f"ℹ️ No receipt found for transaction #{transaction_id}"
+                    
+                    # ============================================
+                    # CLICK EVENTS - AFTER all functions are defined
+                    # ============================================
+                    
+                    # Show all receipts
+                    refresh_all_btn.click(show_all_receipts, outputs=[receipts_list])
+                    
+                    # Upload receipt - returns 2 values: status and file clear
+                    upload_btn.click(
+                        upload_receipt,
+                        inputs=[txn_dropdown, receipt_file],
+                        outputs=[upload_status, receipt_file]
+                    )
+                    
+                    # View receipt - 2 OUTPUTS only
+                    view_btn.click(
+                        view_receipt,
+                        inputs=[view_txn_dropdown],
+                        outputs=[receipt_display, receipt_info]
+                    )
+                    
+                    # Delete receipt
+                    delete_btn.click(
+                        delete_receipt,
+                        inputs=[view_txn_dropdown],
+                        outputs=[delete_status]
+                    )
+                    
+                    # Load initial data
+                    receipts_list.value = show_all_receipts()                     
+                    
+                    
+                
+                    
+                    #   end replace 2608131610
+                    #   end replace
+                    
+                    # Load initial data
+                    receipts_list.value = show_all_receipts()
+                # end receipts
+                # AI insights
+                # --- Budget Sub-Tab: AI Insights ---
+                
+                                # --- Budget Sub-Tab: AI Insights ---
+                with gr.TabItem("🤖 AI Insights"):
+                    gr.Markdown("## AI-Powered Financial Insights")
+                    gr.Markdown("Get intelligent analysis of your spending patterns.")
+                    
+                    # Voice toggle
+                    current_voice_settings = get_voice_settings()
+                    voice_status = "🔊 Voice ON" if current_voice_settings.get("voice_enabled", True) else "🔇 Voice OFF"
+                    
+                    with gr.Row():
+                        voice_toggle = gr.Checkbox(
+                            label="Enable Voice Output",
+                            value=current_voice_settings.get("voice_enabled", True)
+                        )
+                        voice_status_label = gr.Textbox(
+                            label="Voice Status",
+                            value=voice_status,
+                            interactive=False
+                        )
+                    
+                    voice_toggle.change(
+                        toggle_voice,
+                        inputs=[voice_toggle],
+                        outputs=[voice_status_label, voice_toggle]
+                    )
+                    
+                    gr.Markdown("---")
+                    
+                    # Data Source Dropdown
+                    with gr.Row():
+                        data_source = gr.Dropdown(
+                            label="Data Source",
+                            choices=["SQLite Database", "Uploaded Excel", "All Combined"],
+                            value="SQLite Database",
+                            interactive=True
+                        )
+                    
+                    gr.Markdown("## Generate Insights")
+                    
+                    with gr.Row():
+                        insights_btn = gr.Button("🧠 Generate AI Insights", variant="primary")
+                    
+                    insights_output = gr.Textbox(
+                        label="AI Insights",
+                        lines=20,
+                        interactive=False
+                    )
+                    
+                    # --- PDF EXPORT BUTTONS ---
+                    with gr.Row():
+                        export_insights_btn = gr.Button("📄 Export AI Insights PDF", variant="secondary")
+                        insights_pdf_output = gr.File(label="📄 Download AI Insights PDF")
+                    
+                    # --- FIXED: Define export function BEFORE click ---
+                    def export_ai_insights(data_source_choice):
+                        """Export AI insights as PDF."""
+                        # Get insights text (reuse the function)
+                        insights_text = get_ai_insights_with_voice(data_source_choice)
+                        
+                        # Check if insights_text is an error message
+                        if insights_text.startswith("❌") or insights_text.startswith("No data"):
+                            return insights_text, None
+                        
+                        # Get data for charts
+                        df = None
+                        if data_source_choice == "SQLite Database":
+                            df = get_sqlite_data_as_df()
+                        elif data_source_choice == "Uploaded Excel":
+                            try:
+                                if hasattr(get_ai_insights_with_voice, 'last_excel_data'):
+                                    df = get_ai_insights_with_voice.last_excel_data
+                            except:
+                                pass
+                        else:  # All Combined
+                            df_sqlite = get_sqlite_data_as_df()
+                            df_excel = None
+                            try:
+                                if hasattr(get_ai_insights_with_voice, 'last_excel_data'):
+                                    df_excel = get_ai_insights_with_voice.last_excel_data
+                            except:
+                                pass
+                            df_list = []
+                            if df_sqlite is not None and not df_sqlite.empty:
+                                df_list.append(df_sqlite)
+                            if df_excel is not None and not df_excel.empty:
+                                df_list.append(df_excel)
+                            if df_list:
+                                df = pd.concat(df_list, ignore_index=True)
+                        
+                        # Generate charts for PDF
+                        chart_figs = []
+                        if df is not None and not df.empty:
+                            df_copy = df.copy()
+                            if 'Date' not in df_copy.columns:
+                                if 'date' in df_copy.columns:
+                                    df_copy['Date'] = pd.to_datetime(df_copy['date'])
+                            daily = df_copy.groupby('Date').agg({
+                                'Amount': 'sum',
+                                'Income': 'sum'
+                            }).fillna(0)
+                            daily['Net'] = daily['Income'] - daily['Amount']
+                            daily['Cumulative'] = daily['Net'].cumsum()
+                            chart_figs = [
+                                create_line_chart(daily),
+                                create_pie_chart(df_copy),
+                                create_bar_chart(df_copy)
+                            ]
+                        
+                        # Create PDF
+                        pdf_path = create_ai_pdf_report(insights_text, chart_figs)
+                        return insights_text, pdf_path
+                    
+                    # --- CLICK EVENTS ---
+                    insights_btn.click(
+                        get_ai_insights_with_voice,
+                        inputs=[data_source],
+                        outputs=[insights_output]
+                    )
+                    
+                    export_insights_btn.click(
+                        export_ai_insights,
+                        inputs=[data_source],
+                        outputs=[insights_output, insights_pdf_output]
+                    )
+                    
+                    gr.Markdown("---")
+                    gr.Markdown("### Sample Insights")
+                    gr.Markdown("""
+                    **What AI analyzes:**
+                    - Total spending vs income
+                    - Savings rate
+                    - Category breakdowns
+                    - Monthly trends
+                    - Spending patterns
+                    - Personalized recommendations
+                    
+                    *Voice will read insights aloud when enabled.*
+                    """)
+              
+                #end AI insights
+                
+            # ============================================
+            # EDGAR TAB (TOP LEVEL)
+            # ============================================
+            
+            with gr.TabItem("📈 Edgar"):
+                gr.Markdown("## SEC Edgar Financial Analyzer")
+                gr.Markdown("Analyze public companies' financial statements with trend charts.")
+                
+                with gr.Tabs():
+                    
+                    # --- Single Company Analysis with Charts ---
+                    # start company analysis tab
+                    #
+                                        # --- Edgar Sub-Tab: Company Analysis ---
+                    with gr.TabItem("📊 Company Analysis"):
+                        with gr.Row():
+                            ticker_input = gr.Textbox(
+                                label="Ticker", 
+                                placeholder="AAPL", 
+                                value="AAPL"
+                            )
+                            analyze_edgar_btn = gr.Button("📊 Analyze", variant="primary")
+                        
+                        # --- Email input and Save button ---
+                        with gr.Row():
+                            edgar_email_input = gr.Textbox(
+                                label="Email (for SEC identity)",
+                                placeholder="your_email@domain.com",
+                                value="a@b.c"
+                            )
+                            save_edgar_btn = gr.Button("💾 Save Ticker & Email", variant="secondary")
+                            save_edgar_status = gr.Textbox(label="Status", lines=1, interactive=False)
+                        
+                        # --- Save function ---
+                        def save_edgar_data(ticker, email):
+                            """Save ticker and email to history."""
+                            try:
+                                history = []
+                                if os.path.exists(EDGAR_HISTORY_FILE):
+                                    with open(EDGAR_HISTORY_FILE, 'r') as f:
+                                        history = json.load(f)
+                                
+                                # Add new entry
+                                entry = {
+                                    "ticker": ticker.upper().strip(), 
+                                    "email": email, 
+                                    "date": datetime.now().strftime("%Y-%m-%d %H:%M")
+                                }
+                                
+                                # Remove if exists
+                                history = [h for h in history if h["ticker"] != ticker.upper().strip()]
+                                history.insert(0, entry)
+                                
+                                # Keep only last 50
+                                history = history[:50]
+                                
+                                with open(EDGAR_HISTORY_FILE, 'w') as f:
+                                    json.dump(history, f, indent=2)
+                                
+                                return f"✅ Saved {ticker.upper()} with email: {email}"
+                            except Exception as e:
+                                return f"❌ Error: {e}"
+                        
+                        save_edgar_btn.click(
+                            save_edgar_data,
+                            inputs=[ticker_input, edgar_email_input],
+                            outputs=[save_edgar_status]
+                        )
+                        # --- END EMAIL SAVE ---
+                        
+                        edgar_summary = gr.Textbox(label="📋 Financial Summary", lines=15, interactive=False)
+                        
+                        with gr.Row():
+                            edgar_income = gr.Textbox(label="Income Statement", lines=15, interactive=False)
+                            edgar_balance = gr.Textbox(label="Balance Sheet", lines=15, interactive=False)
+                        
+                        edgar_cashflow = gr.Textbox(label="Cash Flow Statement", lines=15, interactive=False)
+                        
+                        # Trend Charts
+                        gr.Markdown("### 📈 Trend Charts")
+                        with gr.Row():
+                            chart_revenue = gr.Plot(label="Revenue Trend")
+                            chart_net_income = gr.Plot(label="Net Income Trend")
+                        with gr.Row():
+                            chart_assets = gr.Plot(label="Total Assets Trend")
+                        
+                        # PDF Export
+                        with gr.Row():
+                            export_edgar_pdf_btn = gr.Button("📄 Export Edgar PDF", variant="secondary")
+                            edgar_pdf_output = gr.File(label="📄 Download Edgar PDF")
+                            edgar_pdf_status = gr.Textbox(label="Status", lines=1, interactive=False)
+                        
+                        export_edgar_pdf_btn.click(
+                            export_edgar_pdf,
+                            inputs=[ticker_input],
+                            outputs=[edgar_pdf_status, edgar_pdf_output]
+                        )
+                        
+                        # --- History Section ---
+                        gr.Markdown("---")
+                        gr.Markdown("### 📋 Saved Ticker History")
+                        
+                        with gr.Row():
+                            refresh_history_btn = gr.Button("🔄 Refresh History", variant="secondary")
+                            history_output = gr.Textbox(label="Saved Tickers", lines=10, interactive=False)
+                        
+                        def show_history():
+                            history = get_edgar_history()
+                            if not history:
+                                return "No tickers saved yet."
+                            result = ""
+                            for h in history:
+                                email = h.get("email", "No email")
+                                result += f"{h['ticker']} (email: {email}) saved: {h['date']}\n"
+                            return result
+                        
+                        refresh_history_btn.click(show_history, outputs=[history_output])
+                        
+                        # Load initial history
+                        history_output.value = show_history()
+                        # --- END HISTORY ---
+                        
+                        analyze_edgar_btn.click(
+                            analyze_edgar_with_charts,
+                            inputs=[ticker_input],
+                            outputs=[edgar_summary, edgar_income, edgar_balance, edgar_cashflow,
+                                    chart_revenue, chart_net_income, chart_assets]
+                        )
+                    
+                    ## 
+                    ## end company analysis
+                    ## 
+                    # --- Company Comparison with Charts ---
+                    with gr.TabItem("📊 Compare Companies"):
+                        gr.Markdown("## Compare Two Companies")
+                        
+                        with gr.Row():
+                            ticker1_input = gr.Textbox(label="Company 1", placeholder="AAPL", value="AAPL")
+                            ticker2_input = gr.Textbox(label="Company 2", placeholder="MSFT", value="MSFT")
+                        
+                        compare_btn = gr.Button("Compare", variant="primary")
+                        compare_output = gr.Textbox(label="Comparison", lines=20, interactive=False)
+                        
+                        # --- NEW: Comparison Charts ---
+                        gr.Markdown("### 📈 Comparison Charts")
+                        with gr.Row():
+                            compare_chart_revenue = gr.Plot(label="Revenue Comparison")
+                            compare_chart_net_income = gr.Plot(label="Net Income Comparison")
+                        with gr.Row():
+                            compare_chart_assets = gr.Plot(label="Assets Comparison")
+                        # --- END NEW ---
+                        
+                        compare_btn.click(
+                            compare_edgar_with_charts,
+                            inputs=[ticker1_input, ticker2_input],
+                            outputs=[compare_output, compare_chart_revenue, 
+                                    compare_chart_net_income, compare_chart_assets]
+                        )
+            # security tab 2608161347
+                        # ============================================
+            # SECURITY TAB - ADD THIS
+            # ============================================
+            with gr.TabItem("🔒 Security"):
+                gr.Markdown("## Database Security")
+                gr.Markdown("Encrypt, decrypt, backup, and restore your database.")
+                
+                # Status Section
+                with gr.Row():
+                    encrypt_status = gr.Textbox(
+                        label="Encryption Status",
+                        value=check_encryption_status(),
+                        interactive=False
+                    )
+                    key_status = gr.Textbox(
+                        label="Key Status",
+                        value=get_key_status(),
+                        interactive=False
+                    )
+                
+                gr.Markdown("---")
+                gr.Markdown("### 🔑 Encryption Key")
+                
+                with gr.Row():
+                    generate_key_btn = gr.Button("🔑 Generate Encryption Key", variant="secondary")
+                    key_result = gr.Textbox(label="Result", lines=2, interactive=False)
+                
+                generate_key_btn.click(generate_encryption_key, outputs=[key_result])
+                
+                gr.Markdown("---")
+                gr.Markdown("### 🔒 Encrypt / Decrypt Database")
+                gr.Markdown("*Encrypting will make your database unreadable without the key.*")
+                
+                with gr.Row():
+                    encrypt_btn = gr.Button("🔒 Encrypt Database", variant="primary")
+                    decrypt_btn = gr.Button("🔓 Decrypt Database", variant="secondary")
+                
+                encrypt_result = gr.Textbox(label="Result", lines=3, interactive=False)
+                
+                encrypt_btn.click(encrypt_database, outputs=[encrypt_result])
+                decrypt_btn.click(decrypt_database, outputs=[encrypt_result])
+                
+                # Refresh status after encryption/decryption
+                def refresh_status():
+                    return check_encryption_status(), get_key_status()
+                
+                encrypt_btn.click(refresh_status, outputs=[encrypt_status, key_status])
+                decrypt_btn.click(refresh_status, outputs=[encrypt_status, key_status])
+                
+                gr.Markdown("---")
+                gr.Markdown("### 📤 Backup Database")
+                
+                with gr.Row():
+                    backup_btn = gr.Button("📤 Create Backup", variant="primary")
+                    backup_file_output = gr.File(label="Download Backup")
+                    backup_status = gr.Textbox(label="Status", lines=2, interactive=False)
+                
+                def create_backup():
+                    result = backup_database()
+                    if isinstance(result, str) and result.startswith("backup_"):
+                        return result, "✅ Backup created successfully!"
+                    return None, f"❌ {result}"
+                
+                backup_btn.click(create_backup, outputs=[backup_file_output, backup_status])
+                
+                gr.Markdown("---")
+                gr.Markdown("### 📥 Restore Database")
+                gr.Markdown("*Restoring will replace ALL current data with the backup.*")
+                
+                restore_file = gr.File(label="Select Backup JSON File", file_types=[".json"])
+                restore_btn = gr.Button("🔄 Restore Database", variant="secondary")
+                restore_status = gr.Textbox(label="Status", lines=2, interactive=False)
+                
+                def restore_db(backup_file):
+                    if backup_file is None:
+                        return "❌ No file selected."
+                    return restore_database(backup_file.name)
+                
+                restore_btn.click(restore_db, inputs=[restore_file], outputs=[restore_status])
+                
+                gr.Markdown("---")
+                gr.Markdown("### 📋 Available Backups")
+                
+                with gr.Row():
+                    list_backups_btn = gr.Button("📋 List Backups", variant="secondary")
+                    backup_list = gr.Textbox(label="Available Backups", lines=10, interactive=False)
+                
+                list_backups_btn.click(
+                    lambda: "\n".join(get_backup_list()) if get_backup_list() else "No backups found.",
+                    outputs=[backup_list]
+                )
+            # end security tab
+    
+    # ============================================
+    # LOGIN BUTTON LOGIC - INSIDE Blocks, OUTSIDE main_app
+    # ============================================
+    
+    def login_action(password):
+        if not is_password_set():
+            return "⚠️ No password set. Please set a password first.", gr.update(visible=False), gr.update(visible=True)
+        
+        if check_password(password):
+            return "✅ Access granted.", gr.update(visible=True), gr.update(visible=False)
+        else:
+            return "❌ Wrong password.", gr.update(visible=False), gr.update(visible=True)
+    
+    # Login button click - properly inside the Blocks context
+    login_btn.click(
+        login_action,
+        inputs=[pwd_input],
+        outputs=[login_status, main_app, login_screen]
+    )
+
+# ============================================
+# RUN THE APP
+# ============================================
+if __name__ == "__main__":
+    demo.launch(theme=gr.themes.Soft())

@@ -1,0 +1,28 @@
+1.chat_history: from the past Gradio secretary projectt
+CREATE TABLE chat_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT,   -- ISO format: 'YYYY-MM-DD HH:MM:SS'
+    role TEXT,        -- 'user' or 'assistant'
+    content TEXT      -- The actual message text
+);
+
+2.transactions — Personal budget entries (from the Treasurer module)
+CREATE TABLE transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT,         -- 'YYYY-MM-DD'
+    time TEXT,         -- 'HH:MM'
+    item TEXT,         -- e.g., 'Bus', 'Breakfast'
+    price REAL,        -- Unit price
+    qty INTEGER,       -- Quantity
+    amount REAL,       -- price * qty
+    income REAL,       -- Income amount (if any)
+    category TEXT      -- 'Traffic', 'Food', 'Income', 'Expenses', 'Other'
+);
+Purpose: Stores manual expense/income entries from the Manual Entry tab.
+
+Used by: add_transaction(), get_transactions_as_df(), and the analysis functions.
+
+
+  There are many others but I lost the track fine,maybe accidentally deleted or lost.
+  You can reconstruct them from this source and https://github.com/rheaghost/gradio_secretary_full1_indented  (.the .py source in it)
+2609020457 KST
